@@ -1,0 +1,50 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: qf_analyser
+      POSTGRES_USER: qf_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-qf_secret}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qf_user -d qf_analyser"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://qf_user:${DB_PASSWORD:-qf_secret}@db:5432/qf_analyser
+      DATABASE_URL_SYNC: postgresql+psycopg2://qf_user:${DB_PASSWORD:-qf_secret}@db:5432/qf_analyser
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    depends_on:
+      - backend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      VITE_PROXY_TARGET: http://backend:8000
+      CHOKIDAR_USEPOLLING: "true"
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+
+volumes:
+  pgdata:
