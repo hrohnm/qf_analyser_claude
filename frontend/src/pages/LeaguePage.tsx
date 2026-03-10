@@ -59,10 +59,18 @@ export function LeaguePage() {
     leagueElo.map(row => [row.team_id, row.elo_overall])
   ) as Record<number, number>
 
-  const matchdayOptions = matchdays.map(md => ({
-    value: String(md),
-    label: `Spieltag ${md}`,
-  }))
+  // Prüfen ob es Lücken in den Spieltagen gibt (z.B. Knockout-Runden bei CL)
+  const hasGaps = matchdays.some((md, i) => i > 0 && md !== matchdays[i - 1] + 1)
+  const knockoutLabels: Record<number, string> = {
+    32: 'Round of 32', 16: 'Round of 16', 8: 'Viertelfinale',
+    4: 'Halbfinale', 3: 'Spiel um Platz 3', 2: 'Finale',
+  }
+  const matchdayOptions = matchdays.map(md => {
+    const label = hasGaps && knockoutLabels[md]
+      ? knockoutLabels[md]
+      : `Spieltag ${md}`
+    return { value: String(md), label }
+  })
 
   if (!league) return <Text c="dimmed">Liga nicht gefunden.</Text>
 
@@ -110,7 +118,7 @@ export function LeaguePage() {
         <GridCol span={{ base: 12, md: 7 }}>
           <Paper withBorder p="md" radius="md">
             <Group justify="space-between" mb="sm">
-              <Text fw={600}>Tabelle nach Spieltag {activeMatchday}</Text>
+              <Text fw={600}>Tabelle nach {matchdayOptions.find(o => o.value === String(activeMatchday))?.label ?? `Spieltag ${activeMatchday}`}</Text>
               <Text size="xs" c="dimmed">{standings.length} Vereine · {selectedSeason}/{selectedSeason + 1}</Text>
             </Group>
             {standingsLoading ? (
@@ -148,7 +156,7 @@ export function LeaguePage() {
               seasonYear={selectedSeason}
               eloByTeam={eloByTeam}
               matchday={activeMatchday}
-              maxMatchday={matchdays.length > 0 ? matchdays[matchdays.length - 1] : 1}
+              matchdays={matchdays}
               onMatchdayChange={md => setSelectedMatchday(md)}
             />
           </Paper>

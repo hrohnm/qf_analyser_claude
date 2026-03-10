@@ -10,6 +10,7 @@ from app.models.fixture_events import FixtureEvent
 from app.models.team_elo_snapshot import TeamEloSnapshot
 from app.models.team_form_snapshot import TeamFormSnapshot
 from app.models.api_call_log import ApiCallLog
+from app.models.fixture_odds import FixtureOdds
 
 __all__ = [
     "League",
@@ -24,4 +25,5 @@ __all__ = [
     "TeamEloSnapshot",
     "TeamFormSnapshot",
     "ApiCallLog",
+    "FixtureOdds",
 ]

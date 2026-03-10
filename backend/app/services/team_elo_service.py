@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
-from math import pow
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,7 @@ FINISHED_STATUSES = {"FT", "AET", "PEN"}
 BASE_ELO = 1500.0
 HOME_ADVANTAGE = 60.0
 K_FACTOR = 24.0
-MODEL_VERSION = "team_elo_v1"
+MODEL_VERSION = "team_elo_v2"
 
 
 @dataclass
@@ -46,22 +46,24 @@ def _actual(gf: int, ga: int) -> float:
 
 
 def _goal_diff_factor(gf: int, ga: int) -> float:
+    """Continuous log formula per pattern spec: 1 + 0.75 * ln(gd)."""
     gd = abs(gf - ga)
-    if gd <= 1:
+    if gd == 0:
         return 1.0
-    if gd == 2:
-        return 1.5
-    if gd == 3:
-        return 1.75
-    return 2.0
+    return 1.0 + 0.75 * math.log(gd)
+
+
+def _strength_factor(own_elo: float, opp_elo: float) -> float:
+    """Upsets against strong opponents are rewarded more, per pattern spec."""
+    return max(0.85, min(1.15, opp_elo / max(1.0, own_elo)))
 
 
 def _tier(elo: float) -> str:
-    if elo >= 1650.0:
+    if elo >= 1600.0:
         return "elite"
-    if elo >= 1550.0:
+    if elo >= 1500.0:
         return "strong"
-    if elo >= 1450.0:
+    if elo >= 1400.0:
         return "average"
     return "weak"
 
@@ -116,17 +118,21 @@ async def recompute_team_elo_for_league(
         expected_home = _expected(home_state.overall, away_state.overall, own_is_home=True)
         actual_home = _actual(f.home_score, f.away_score)
         gd_factor = _goal_diff_factor(f.home_score, f.away_score)
-        delta = K_FACTOR * gd_factor * (actual_home - expected_home)
+        sf_home = _strength_factor(home_state.overall, away_state.overall)
+        sf_away = _strength_factor(away_state.overall, home_state.overall)
+        delta = K_FACTOR * gd_factor * sf_home * (actual_home - expected_home)
+        delta_away = K_FACTOR * gd_factor * sf_away * ((1.0 - actual_home) - (1.0 - expected_home))
 
         home_state.overall += delta
-        away_state.overall -= delta
+        away_state.overall += delta_away
         home_state.games_played += 1
         away_state.games_played += 1
 
         expected_home_split = _expected(home_state.home, away_state.away, own_is_home=True)
-        delta_split = K_FACTOR * gd_factor * (actual_home - expected_home_split)
-        home_state.home += delta_split
-        away_state.away -= delta_split
+        delta_split_home = K_FACTOR * gd_factor * sf_home * (actual_home - expected_home_split)
+        delta_split_away = K_FACTOR * gd_factor * sf_away * ((1.0 - actual_home) - (1.0 - expected_home_split))
+        home_state.home += delta_split_home
+        away_state.away += delta_split_away
         home_state.games_home += 1
         away_state.games_away += 1
 

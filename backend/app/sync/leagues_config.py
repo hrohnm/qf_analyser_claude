@@ -1,6 +1,10 @@
 # api-football.com league IDs for all target leagues
-# Verified IDs for the 2024/2025 season
+# Verified IDs for the 2025/2026 season
 LEAGUES: list[dict] = [
+    # European Competitions
+    {"id": 2,   "name": "UEFA Champions League",        "country": "Europe", "tier": 1},
+    {"id": 3,   "name": "UEFA Europa League",           "country": "Europe", "tier": 1},
+    {"id": 848, "name": "UEFA Europa Conference League","country": "Europe", "tier": 1},
     # Germany
     {"id": 78,  "name": "Bundesliga",       "country": "Germany", "tier": 1},
     {"id": 79,  "name": "2. Bundesliga",    "country": "Germany", "tier": 2},

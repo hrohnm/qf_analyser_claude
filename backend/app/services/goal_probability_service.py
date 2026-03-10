@@ -9,10 +9,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.fixture import Fixture
 from app.models.fixture_goal_probability import FixtureGoalProbability
+from app.models.fixture_statistics import FixtureStatistics
 from app.models.team_elo_snapshot import TeamEloSnapshot
 
 FINISHED_STATUSES = {"FT", "AET", "PEN"}
-MODEL_VERSION = "goal_prob_v1"
+MODEL_VERSION = "goal_prob_v2"
 RECENCY_ALPHA = 0.02
 WINDOW = 12
 
@@ -90,36 +91,68 @@ async def _league_avg_goals_against(
     return max(0.2, total_goals / team_games)
 
 
-async def _opponent_avg_goals_against(
+async def _opponent_defensive_quality(
     db: AsyncSession,
     opponent_id: int,
     league_id: int,
     season_year: int,
     before_kickoff: datetime | None,
+    league_avg_ga: float,
     cache: dict[int, float],
 ) -> float:
+    """Returns w_def: higher = tougher defense (scoring against them was harder).
+    Uses 0.6 * goals_ratio + 0.4 * xga_ratio per pattern spec; falls back to
+    goals_ratio alone when xG data is unavailable."""
     if opponent_id in cache:
         return cache[opponent_id]
 
     fixtures = await _recent_team_matches(
-        db=db,
-        team_id=opponent_id,
-        league_id=league_id,
-        season_year=season_year,
-        before_kickoff=before_kickoff,
-        limit=20,
+        db=db, team_id=opponent_id, league_id=league_id,
+        season_year=season_year, before_kickoff=before_kickoff, limit=20,
     )
+    if not fixtures:
+        cache[opponent_id] = 1.0
+        return 1.0
+
+    fixture_ids = [f.id for f in fixtures]
+    stats_rows = await db.execute(
+        select(FixtureStatistics).where(
+            FixtureStatistics.fixture_id.in_(fixture_ids),
+            FixtureStatistics.team_id == opponent_id,
+        )
+    )
+    xga_map = {s.fixture_id: float(s.expected_goals) for s in stats_rows.scalars().all()
+               if s.expected_goals is not None}
+
     ga_total = 0
+    xga_total = 0.0
     games = 0
+    xg_games = 0
     for f in fixtures:
         if f.home_score is None or f.away_score is None:
             continue
-        if f.home_team_id == opponent_id:
-            ga_total += f.away_score
-        else:
-            ga_total += f.home_score
+        ga = f.away_score if f.home_team_id == opponent_id else f.home_score
+        ga_total += ga
         games += 1
-    value = (ga_total / games) if games > 0 else 1.4
+        if f.id in xga_map:
+            xga_total += xga_map[f.id]
+            xg_games += 1
+
+    if games == 0:
+        cache[opponent_id] = 1.0
+        return 1.0
+
+    opp_avg_ga = ga_total / games
+    goals_ratio = _clamp(league_avg_ga / max(0.2, opp_avg_ga), 0.85, 1.15)
+
+    if xg_games >= 3:
+        opp_avg_xga = xga_total / xg_games
+        xga_ratio = _clamp(league_avg_ga / max(0.2, opp_avg_xga), 0.85, 1.15)
+        value = 0.6 * goals_ratio + 0.4 * xga_ratio
+    else:
+        value = goals_ratio
+
+    value = _clamp(value, 0.85, 1.15)
     cache[opponent_id] = value
     return value
 
@@ -165,17 +198,17 @@ async def _compute_for_team(
         opp_id = m.away_team_id if hist_is_home else m.home_team_id
 
         opp_elo = float(elo_by_team[opp_id].elo_overall) if opp_id in elo_by_team else league_elo_mean
-        w_elo = _clamp(opp_elo / league_elo_mean, 0.85, 1.20)
+        w_elo = _clamp(opp_elo / league_elo_mean, 0.90, 1.15)
 
-        opp_avg_ga = await _opponent_avg_goals_against(
+        w_def = await _opponent_defensive_quality(
             db=db,
             opponent_id=opp_id,
             league_id=fixture.league_id,
             season_year=fixture.season_year,
             before_kickoff=fixture.kickoff_utc,
+            league_avg_ga=league_avg_ga,
             cache=opp_ga_cache,
         )
-        w_def = _clamp(league_avg_ga / max(0.2, opp_avg_ga), 0.80, 1.25)
 
         w_venue = 1.10 if hist_is_home == is_home_target else 0.90
 
@@ -185,7 +218,8 @@ async def _compute_for_team(
             days = 30.0
         w_recency = math.exp(-RECENCY_ALPHA * days)
 
-        w = w_elo * w_def * w_venue * w_recency
+        # Additive combination per pattern spec: (w_elo + w_def + w_venue - 2) * w_recency
+        w = (w_elo + w_def + w_venue - 2.0) * w_recency
         weighted_goals += goals_for * w
         weighted_games += w
 

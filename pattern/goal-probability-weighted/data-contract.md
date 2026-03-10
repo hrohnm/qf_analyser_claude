@@ -26,11 +26,11 @@ Aus `team_elo_snapshot`:
 - `elo_home`
 - `elo_away`
 
-Aus `fixture_statistics` (Defensive Kontexte):
+Aus `fixture_statistics` (Defensive Kontexte des Gegners):
 
-- `expected_goals` (xG against Proxy)
+- `expected_goals` (xG against Proxy für `opp_def_idx`)
 - `shots_on_goal` (allowed)
-- `goals_against` (aus fixtures ableitbar)
+- `goals_against` (abgeleitet aus `fixtures.home_score` / `away_score`, kein separates Feld erforderlich)
 
 ## Ziel-Output (neue Tabelle vorgeschlagen)
 
@@ -43,10 +43,13 @@ Aus `fixture_statistics` (Defensive Kontexte):
 - `season_year`
 - `league_id`
 - `lambda_weighted`
+- `lambda_final` (nach Matchup-Korrektur; gleich `lambda_weighted` wenn kein Form-Snapshot verfügbar)
+- `matchup_factor` (nullable, nur wenn `team_form_snapshot` verfügbar)
 - `p_ge_1_goal`
 - `p_ge_2_goals`
 - `p_ge_3_goals`
 - `confidence`
-- `sample_size`
+- `sample_size` (Anzahl eingeflossener Spiele)
+- `weighted_sample_size` (Summe der `w_m`-Gewichte; aussagekräftiger als rohe Spielanzahl)
 - `computed_at`
 - `model_version` (z. B. `goal_prob_v1`)

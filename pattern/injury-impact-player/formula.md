@@ -8,22 +8,31 @@ Alle Teilwerte im Bereich `0..1`.
 
 ## 1) Importance Score
 
-Proxy ohne vollständige Minuten-Daten (v1):
-
 - `appearance_rate_last10` = Einsätze in letzten 10 Teamspielen / 10
-- `starter_proxy` = 1.0 bei häufigen Early-Events (< 60'), sonst 0.6
+- `starter_proxy`:
+  - Primär: Spieler erscheint in `fixture_lineups` als Starter → `1.0`
+  - Fallback (keine Lineup-Daten): Spieler taucht in Events vor Minute 60 auf → `1.0`
+  - Sonst (Joker / unbekannt): `0.6`
+  - Achtung: Torhüter und Innenverteidiger erscheinen selten in Events — Lineup-Daten bevorzugen.
 
 `importance = 0.7 * appearance_rate_last10 + 0.3 * starter_proxy`
 
 ## 2) Contribution Score
 
-Positionsagnostisch (v1, offensiv-lastig):
+v1 — offensiv-lastig (vereinfacht, positionsunabhängig):
 
-- `goal_rate = goals_last10 / team_goals_last10`
-- `assist_rate = assists_last10 / team_goals_last10`
-- `key_event_rate = key_events_last10 / team_key_events_last10` (optional)
+- `goal_rate = goals_last10 / max(team_goals_last10, 1)`
+- `assist_rate = assists_last10 / max(team_goals_last10, 1)`
+- `key_event_rate = key_events_last10 / max(team_key_events_last10, 1)` (optional)
 
 `contribution = clamp(0.6 * goal_rate + 0.3 * assist_rate + 0.1 * key_event_rate, 0, 1)`
+
+Bekannte Einschränkung: Torhüter, Innenverteidiger und defensive Mittelfeldspieler werden systematisch unterbewertet, da sie selten Tore/Assists erzielen. Positionsspezifische Metriken sind für v2 vorgesehen:
+
+- GK: Save-Rate, Clean-Sheet-Anteil
+- DEF: Defensive Duelle, Interceptions
+- MID: Ball Recoveries, Key Passes
+- FWD: aktuelle Formel anwendbar
 
 Wenn Daten fehlen:
 
@@ -47,26 +56,39 @@ Fallback ohne Kaderdaten:
 
 ## 4) Availability Factor
 
-Verletzungstyp:
+Verletzungstyp beeinflusst, wie sicher der Ausfall ist:
 
-- `Missing Fixture` -> `1.0`
-- `Questionable` -> `0.55`
+| injury_type       | availability_factor | Begründung                                      |
+|-------------------|--------------------|-------------------------------------------------|
+| `missing_fixture` | `1.0`              | Ausfall bestätigt                               |
+| `questionable`    | `0.55`             | Historisch ~45 % der „Questionable"-Fälle spielen |
+
+Quelle für 0.55: Näherungswert basierend auf gängigen Sport-Datenprovider-Statistiken; sollte per Backtest kalibriert werden.
 
 ## 5) Teamaggregat
 
-`team_injury_impact = sum(top_n impact_score pro Team, n=5)`
+Alle verletzten/fraglichen Spieler eines Teams fließen ein (kein hartes n-Limit):
 
-Optional cap:
+`team_injury_impact = min(100, sum(impact_score für alle Spieler des Teams))`
 
-- `team_injury_impact = min(100, team_injury_impact)`
+Begründung: Ein fixes n=5 ignoriert reale Fälle mit 6–8 Verletzten und überschätzt bei nur 1–2 Verletzten nicht.
 
-## 6) Confidence
+## 6) Impact Bucket
 
-Beispiel:
+| impact_score | Code (DB)  | Anzeige (DE) |
+|--------------|------------|--------------|
+| `0–19`       | `low`      | Gering       |
+| `20–49`      | `medium`   | Mittel       |
+| `50–74`      | `high`     | Hoch         |
+| `75–100`     | `critical` | Kritisch     |
+
+DB-Enum-Wert: Englisch. Anzeige im Frontend: Deutsch (per i18n-Mapping).
+
+## 7) Confidence
 
 - Start bei `1.0`
-- `-0.2` falls Minuten fehlen
-- `-0.2` falls Position fehlt
-- `-0.2` falls weniger als 5 Spiele Historie
+- `-0.2` falls Lineup-/Minuten-Daten fehlen (Starter-Proxy auf Events angewiesen)
+- `-0.2` falls Position fehlt (Contributions-Fallback aktiv)
+- `-0.2` falls weniger als 5 Spiele Historie vorhanden
 
 `confidence = clamp(value, 0.1, 1.0)`

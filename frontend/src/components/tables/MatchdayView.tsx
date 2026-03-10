@@ -16,11 +16,14 @@ interface Props {
   seasonYear: number
   eloByTeam?: Record<number, number>
   matchday: number
-  maxMatchday: number
+  matchdays: number[]
   onMatchdayChange: (md: number) => void
 }
 
-export function MatchdayView({ leagueId, seasonYear, eloByTeam, matchday, maxMatchday, onMatchdayChange }: Props) {
+export function MatchdayView({ leagueId, seasonYear, eloByTeam, matchday, matchdays, onMatchdayChange }: Props) {
+  const currentIndex = matchdays.indexOf(matchday)
+  const prevMatchday = currentIndex > 0 ? matchdays[currentIndex - 1] : null
+  const nextMatchday = currentIndex < matchdays.length - 1 ? matchdays[currentIndex + 1] : null
   const navigate = useNavigate()
   const { data: fixtures = [], isLoading } = useQuery({
     queryKey: ['fixtures-matchday', leagueId, seasonYear, matchday],
@@ -51,8 +54,8 @@ export function MatchdayView({ leagueId, seasonYear, eloByTeam, matchday, maxMat
       <Group justify="space-between" align="center">
         <ActionIcon
           variant="subtle"
-          disabled={matchday <= 1}
-          onClick={() => onMatchdayChange(matchday - 1)}
+          disabled={prevMatchday === null}
+          onClick={() => prevMatchday !== null && onMatchdayChange(prevMatchday)}
           size="md"
         >
           <IconChevronLeft size={18} />
@@ -67,8 +70,8 @@ export function MatchdayView({ leagueId, seasonYear, eloByTeam, matchday, maxMat
 
         <ActionIcon
           variant="subtle"
-          disabled={matchday >= maxMatchday}
-          onClick={() => onMatchdayChange(matchday + 1)}
+          disabled={nextMatchday === null}
+          onClick={() => nextMatchday !== null && onMatchdayChange(nextMatchday)}
           size="md"
         >
           <IconChevronRight size={18} />

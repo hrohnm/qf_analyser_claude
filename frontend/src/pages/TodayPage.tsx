@@ -14,9 +14,9 @@ import { leagueLogoUrl, countryFlagUrl, COUNTRY_FLAGS, type Fixture } from '../t
 
 dayjs.locale('de')
 
-const COUNTRY_ORDER = ['Germany', 'England', 'Spain', 'France', 'Italy', 'Turkey']
+const COUNTRY_ORDER = ['Europe', 'Germany', 'England', 'Spain', 'France', 'Italy', 'Turkey']
 const COUNTRY_NAMES: Record<string, string> = {
-  Germany: 'Deutschland', England: 'England', Spain: 'Spanien',
+  Europe: 'Europa', Germany: 'Deutschland', England: 'England', Spain: 'Spanien',
   France: 'Frankreich', Italy: 'Italien', Turkey: 'Türkei',
 }
 
@@ -72,7 +72,7 @@ export function TodayPage() {
       <Group justify="space-between" align="center">
         <Stack gap={2}>
           <Title order={2}>Spieltag</Title>
-          <Text c="dimmed" size="sm">Spiele unserer 18 Ligen</Text>
+          <Text c="dimmed" size="sm">Spiele unserer 21 Ligen & Wettbewerbe</Text>
         </Stack>
 
         {/* Datums-Navigation */}

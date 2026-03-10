@@ -13,6 +13,7 @@ from app.models.fixture_goal_probability import FixtureGoalProbability
 from app.models.fixture_injury import FixtureInjury
 from app.models.fixture_injury_impact import FixtureInjuryImpact
 from app.models.fixture_prediction import FixturePrediction
+from app.models.fixture_odds import FixtureOdds
 from app.models.fixture_statistics import FixtureStatistics
 from app.models.league import League
 from app.models.team import Team
@@ -103,6 +104,7 @@ class FixtureDetailsOut(BaseModel):
     team_injury_impact_away: float = 0.0
     statistics: list[FixtureStatisticOut]
     events: list[FixtureEventOut]
+    odds: list[dict] = []
 
 
 def _to_out(f: Fixture, league: League | None = None) -> FixtureOut:
@@ -401,6 +403,23 @@ async def fixture_details(
         2,
     )
 
+    odds_result = await db.execute(
+        select(FixtureOdds)
+        .where(FixtureOdds.fixture_id == fixture_id)
+        .order_by(FixtureOdds.bookmaker_id, FixtureOdds.bet_id)
+    )
+    odds = [
+        {
+            "bookmaker_id": o.bookmaker_id,
+            "bookmaker_name": o.bookmaker_name,
+            "bet_id": o.bet_id,
+            "bet_name": o.bet_name,
+            "values": o.values,
+            "updated_at": o.updated_at.isoformat() if o.updated_at else None,
+        }
+        for o in odds_result.scalars().all()
+    ]
+
     return FixtureDetailsOut(
         fixture=_to_out(fixture, league),
         prediction=prediction_out,
@@ -415,6 +434,7 @@ async def fixture_details(
         team_injury_impact_away=away_impact,
         statistics=statistics,
         events=events,
+        odds=odds,
     )
 
 

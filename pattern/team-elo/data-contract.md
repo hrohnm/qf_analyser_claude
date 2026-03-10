@@ -44,9 +44,13 @@ Optional Historie:
 
 `team_elo_history`
 
+- `id`
 - `team_id`
 - `fixture_id`
-- `elo_before`
-- `elo_after`
+- `league_id`
+- `season_year`
+- `scope` (`overall` | `home` | `away`)
+- `elo_before` (elo_overall vor diesem Match)
+- `elo_after` (elo_overall nach diesem Match)
 - `elo_change`
 - `computed_at`

@@ -13,6 +13,7 @@ from app.sync.jobs.sync_goal_probability import sync_goal_probability_for_today
 from app.sync.jobs.sync_predictions import sync_predictions_for_today
 from app.sync.jobs.sync_fixtures import sync_all_fixtures
 from app.sync.jobs.sync_fixture_details import sync_details_for_today, sync_details_for_leagues
+from app.sync.jobs.sync_odds import sync_odds_for_today, DEFAULT_BOOKMAKER_ID
 from app.services.team_elo_service import recompute_team_elo_for_league
 from app.services.team_form_service import recompute_team_form_for_league
 
@@ -461,4 +462,74 @@ async def trigger_goal_probability_today_run(
         fetched=result.get("fetched", 0),
         skipped=result.get("skipped", 0),
         errors=result.get("errors", 0),
+    )
+
+
+class OddsResult(BaseModel):
+    message: str
+    season_year: int
+    bookmaker_id: int
+    fixtures_today: int
+    fetched: int
+    skipped: int
+    errors: int
+    api_calls: int
+    bet_rows: int
+
+
+@router.post("/odds/today", response_model=OddsResult)
+async def trigger_odds_today(
+    background_tasks: BackgroundTasks,
+    season_year: int = 2025,
+    bookmaker_id: int = DEFAULT_BOOKMAKER_ID,
+    force: bool = False,
+):
+    """Startet Odds-Sync für alle heutigen Fixtures im Hintergrund."""
+    global _sync_running
+    if _sync_running:
+        raise HTTPException(status_code=409, detail="Sync läuft bereits.")
+
+    async def run():
+        global _sync_running
+        _sync_running = True
+        try:
+            await sync_odds_for_today(season_year=season_year, bookmaker_id=bookmaker_id, force=force)
+        finally:
+            _sync_running = False
+
+    background_tasks.add_task(run)
+    return OddsResult(
+        message=f"Odds-Sync für heute gestartet (Bookmaker {bookmaker_id}, Hintergrund).",
+        season_year=season_year, bookmaker_id=bookmaker_id,
+        fixtures_today=0, fetched=0, skipped=0, errors=0, api_calls=0, bet_rows=0,
+    )
+
+
+@router.post("/odds/today/run", response_model=OddsResult)
+async def trigger_odds_today_run(
+    season_year: int = 2025,
+    bookmaker_id: int = DEFAULT_BOOKMAKER_ID,
+    force: bool = False,
+):
+    """Startet Odds-Sync für alle heutigen Fixtures synchron und wartet auf Ergebnis."""
+    global _sync_running
+    if _sync_running:
+        raise HTTPException(status_code=409, detail="Sync läuft bereits.")
+
+    _sync_running = True
+    try:
+        result = await sync_odds_for_today(season_year=season_year, bookmaker_id=bookmaker_id, force=force)
+    finally:
+        _sync_running = False
+
+    return OddsResult(
+        message="Odds-Sync für heute abgeschlossen.",
+        season_year=season_year,
+        bookmaker_id=bookmaker_id,
+        fixtures_today=result.get("fixtures_today", 0),
+        fetched=result.get("fetched", 0),
+        skipped=result.get("skipped", 0),
+        errors=result.get("errors", 0),
+        api_calls=result.get("api_calls", 0),
+        bet_rows=result.get("bet_rows", 0),
     )
