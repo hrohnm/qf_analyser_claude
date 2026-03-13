@@ -15,59 +15,41 @@ Für jedes historische Spiel `m` des Teams:
 
 ## 2) Spielgewicht `w_m`
 
-Additive Kombination der Kontextfaktoren, multipliziert mit Aktualität:
-
-`w_m = (1 + (w_elo - 1) + (w_def - 1) + (w_venue - 1)) * w_recency`
-
-Vereinfacht: `w_m = (w_elo + w_def + w_venue - 2) * w_recency`
-
-Dadurch addieren sich die Einflüsse statt sich multiplikativ zu potenzieren (kein Extremwert-Compounding).
+`w_m = w_elo * w_def * w_venue * w_recency`
 
 ### 2.1 Gegner-Elo-Faktor
 
 - `opp_elo_rel = opponent_elo / league_elo_mean`
-- `w_elo = clamp(opp_elo_rel, 0.90, 1.15)`
+- `w_elo = clamp(opp_elo_rel, 0.85, 1.20)`
 
-Symmetrisches Clamp: max. ±15 % Abweichung.
 Interpretation: Tore gegen starke Gegner erhalten höheres Gewicht.
 
 ### 2.2 Defensiv-Faktor Gegner
 
-Defensivstärke-Index aus den letzten 10 Spielen des Gegners:
+Defensivstärke-Index des Gegners (z. B. aus Gegentore/xGA der letzten 10 Spiele):
 
-```
-goals_conceded_per_game = opp_goals_conceded_last10 / max(opp_games_last10, 1)
-xga_per_game            = opp_xga_last10 / max(opp_games_last10, 1)
+- `opp_def_idx` in `[0.7, 1.3]` (höher = defensiv stärker)
+- `w_def = opp_def_idx`
 
-goal_ratio = league_avg_goals_conceded / max(goals_conceded_per_game, 0.1)
-xga_ratio  = league_avg_xga / max(xga_per_game, 0.1)
-
-opp_def_idx = clamp(0.6 * goal_ratio + 0.4 * xga_ratio, 0.85, 1.15)
-```
-
-`w_def = opp_def_idx`
-
-Interpretation: `opp_def_idx > 1` → Gegner lässt weniger Tore als Liga-Durchschnitt → Tor zählt mehr.
+Interpretation: Tor gegen starke Defensive zählt mehr.
 
 ### 2.3 Heim/Auswärts-Kontext
 
-Für Torwahrscheinlichkeit des **Heimteams**:
-- historische Heimspiele: `w_venue = 1.10`
-- historische Auswärtsspiele: `w_venue = 0.90`
+Für Torwahrscheinlichkeit des Heimteams:
 
-Für Torwahrscheinlichkeit des **Auswärtsteams**: Gewichte umgekehrt.
+- historische Heimspiele stärker gewichten (z. B. `1.10`), Auswärtsspiele `0.90`
+
+Für Torwahrscheinlichkeit des Auswärtsteams analog umgekehrt.
 
 ### 2.4 Aktualitätsfaktor
 
 Exponentielle Abwertung:
 
-- `w_recency = exp(-alpha * days_since_match)` mit `alpha = 0.02`
+- `w_recency = exp(-alpha * days_since_match)` mit `alpha ~ 0.02`
 
-Neuere Spiele zählen mehr. Beispiel: 30 Tage → `w_recency ≈ 0.55`
+Neuere Spiele zählen mehr.
 
 ## 3) Poisson-Wahrscheinlichkeiten
-
-Edge Case: Falls `lambda_weighted == 0` (Team hat im gesamten Fenster kein Tor erzielt), wird `lambda_weighted = 0.1` als Minimum gesetzt, um nicht-triviale Ausgaben zu gewährleisten.
 
 Mit `lambda = lambda_weighted`:
 
@@ -78,20 +60,13 @@ Mit `lambda = lambda_weighted`:
 
 ## 4) Korrektur mit Matchup
 
-Optionaler Matchup-Faktor basierend auf aktueller Form beider Teams:
+Optionaler Matchup-Faktor:
 
-```
-attack_form_norm = clamp(attack_team_form_score / 50, 0.70, 1.50)
-def_form_norm    = clamp(def_opp_form_score / 50,    0.70, 1.50)
+- `attack_team_form` aus `team_form_snapshot`
+- `def_opp_form` als inverse Defensivform
+- `lambda_final = lambda_weighted * matchup_factor`
 
-matchup_factor = clamp(attack_form_norm / def_form_norm, 0.85, 1.20)
-```
-
-- `attack_team_form_score`: `form_score` des angreifenden Teams aus `team_form_snapshot`
-- `def_opp_form_score`: `form_score` des Gegners (Defensivkontext)
-- Bei `form_score = 50` (Durchschnitt) beider Teams: `matchup_factor = 1.0` (keine Korrektur)
-
-`lambda_final = lambda_weighted * matchup_factor`
+`matchup_factor` typischerweise in `[0.85, 1.20]`.
 
 ## 5) Confidence
 

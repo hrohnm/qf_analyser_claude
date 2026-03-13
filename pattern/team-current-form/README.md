@@ -1,6 +1,6 @@
 # Pattern: Team Current Form
 
-Status: `draft`
+Status: `production`
 
 ## Zweck
 

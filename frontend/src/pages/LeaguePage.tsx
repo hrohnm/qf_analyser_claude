@@ -1,5 +1,5 @@
 import {
-  Stack, Title, Group, Text, Select, Badge,
+  Stack, Title, Group, Text, Select, Badge, Tabs,
   Loader, Center, Image, Grid, GridCol, ScrollArea, Paper
 } from '@mantine/core'
 import { useNavigate, useParams } from 'react-router-dom'
@@ -11,6 +11,7 @@ import { standingsApi, fixturesApi, leaguesApi } from '../api'
 import { leagueLogoUrl, countryFlagUrl } from '../types'
 import { StandingsTable } from '../components/tables/StandingsTable'
 import { MatchdayView } from '../components/tables/MatchdayView'
+import { TeamProfilesTable } from '../components/tables/TeamProfilesTable'
 
 export function LeaguePage() {
   const navigate = useNavigate()
@@ -28,8 +29,6 @@ export function LeaguePage() {
     enabled: !!leagueId,
   })
 
-  // Aktueller Spieltag = nächster mit mind. 1 offenen Spiel (NS),
-  // sonst der letzte abgeschlossene
   const { data: upcomingFixtures = [] } = useQuery({
     queryKey: ['upcoming-check', leagueId, selectedSeason],
     queryFn: () => fixturesApi.list({ league_id: leagueId, season_year: selectedSeason, status: 'NS', limit: 1 }),
@@ -59,18 +58,10 @@ export function LeaguePage() {
     leagueElo.map(row => [row.team_id, row.elo_overall])
   ) as Record<number, number>
 
-  // Prüfen ob es Lücken in den Spieltagen gibt (z.B. Knockout-Runden bei CL)
-  const hasGaps = matchdays.some((md, i) => i > 0 && md !== matchdays[i - 1] + 1)
-  const knockoutLabels: Record<number, string> = {
-    32: 'Round of 32', 16: 'Round of 16', 8: 'Viertelfinale',
-    4: 'Halbfinale', 3: 'Spiel um Platz 3', 2: 'Finale',
-  }
-  const matchdayOptions = matchdays.map(md => {
-    const label = hasGaps && knockoutLabels[md]
-      ? knockoutLabels[md]
-      : `Spieltag ${md}`
-    return { value: String(md), label }
-  })
+  const matchdayOptions = matchdays.map(md => ({
+    value: String(md),
+    label: `Spieltag ${md}`,
+  }))
 
   if (!league) return <Text c="dimmed">Liga nicht gefunden.</Text>
 
@@ -112,56 +103,78 @@ export function LeaguePage() {
         />
       </Group>
 
-      {/* ── Hauptlayout: Tabelle links, Spieltag rechts ──────── */}
-      <Grid gutter="md">
-        {/* Tabelle */}
-        <GridCol span={{ base: 12, md: 7 }}>
-          <Paper withBorder p="md" radius="md">
-            <Group justify="space-between" mb="sm">
-              <Text fw={600}>Tabelle nach {matchdayOptions.find(o => o.value === String(activeMatchday))?.label ?? `Spieltag ${activeMatchday}`}</Text>
-              <Text size="xs" c="dimmed">{standings.length} Vereine · {selectedSeason}/{selectedSeason + 1}</Text>
-            </Group>
-            {standingsLoading ? (
-              <Center py="xl"><Loader /></Center>
-            ) : (
-              <ScrollArea>
-                <StandingsTable
-                  standings={standings}
+      {/* ── Tabs ─────────────────────────────────────────────── */}
+      <Tabs defaultValue="overview" keepMounted={false}>
+        <Tabs.List>
+          <Tabs.Tab value="overview">Übersicht</Tabs.Tab>
+          <Tabs.Tab value="profiles">Teamprofile</Tabs.Tab>
+        </Tabs.List>
+
+        {/* ── Tab: Übersicht (Tabelle + Spieltag) ──────────── */}
+        <Tabs.Panel value="overview" pt="md">
+          <Grid gutter="md">
+            <GridCol span={{ base: 12, md: 7 }}>
+              <Paper withBorder p="md" radius="md">
+                <Group justify="space-between" mb="sm">
+                  <Text fw={600}>Tabelle nach Spieltag {activeMatchday}</Text>
+                  <Text size="xs" c="dimmed">{standings.length} Vereine · {selectedSeason}/{selectedSeason + 1}</Text>
+                </Group>
+                {standingsLoading ? (
+                  <Center py="xl"><Loader /></Center>
+                ) : (
+                  <ScrollArea>
+                    <StandingsTable
+                      standings={standings}
+                      eloByTeam={eloByTeam}
+                      onTeamClick={(teamId) => navigate(`/team/${teamId}?season_year=${selectedSeason}&league_id=${leagueId}`)}
+                    />
+                  </ScrollArea>
+                )}
+              </Paper>
+            </GridCol>
+
+            <GridCol span={{ base: 12, md: 5 }}>
+              <Paper withBorder p="md" radius="md">
+                <Group justify="space-between" mb="sm">
+                  <Text fw={600}>Spieltag</Text>
+                  <Select
+                    value={String(activeMatchday)}
+                    onChange={v => v && setSelectedMatchday(Number(v))}
+                    data={matchdayOptions}
+                    size="xs"
+                    w={150}
+                    searchable
+                    disabled={matchdays.length === 0}
+                  />
+                </Group>
+                <MatchdayView
+                  leagueId={leagueId}
+                  seasonYear={selectedSeason}
                   eloByTeam={eloByTeam}
-                  onTeamClick={(teamId) => navigate(`/team/${teamId}?season_year=${selectedSeason}&league_id=${leagueId}`)}
+                  matchday={activeMatchday}
+                  maxMatchday={matchdays.length > 0 ? matchdays[matchdays.length - 1] : 1}
+                  onMatchdayChange={md => setSelectedMatchday(md)}
                 />
-              </ScrollArea>
-            )}
-          </Paper>
-        </GridCol>
+              </Paper>
+            </GridCol>
+          </Grid>
+        </Tabs.Panel>
 
-        {/* Spieltag */}
-        <GridCol span={{ base: 12, md: 5 }}>
+        {/* ── Tab: Teamprofile ──────────────────────────────── */}
+        <Tabs.Panel value="profiles" pt="md">
           <Paper withBorder p="md" radius="md">
             <Group justify="space-between" mb="sm">
-              <Text fw={600}>Spieltag</Text>
-              <Select
-                value={String(activeMatchday)}
-                onChange={v => v && setSelectedMatchday(Number(v))}
-                data={matchdayOptions}
-                size="xs"
-                w={150}
-                searchable
-                disabled={matchdays.length === 0}
-              />
+              <Text fw={600}>Teamprofile</Text>
+              <Text size="xs" c="dimmed">{selectedSeason}/{selectedSeason + 1}</Text>
             </Group>
-
-            <MatchdayView
+            <TeamProfilesTable
               leagueId={leagueId}
               seasonYear={selectedSeason}
-              eloByTeam={eloByTeam}
-              matchday={activeMatchday}
-              matchdays={matchdays}
-              onMatchdayChange={md => setSelectedMatchday(md)}
+              onTeamClick={(teamId) => navigate(`/team/${teamId}?season_year=${selectedSeason}&league_id=${leagueId}`)}
             />
           </Paper>
-        </GridCol>
-      </Grid>
+        </Tabs.Panel>
+      </Tabs>
     </Stack>
   )
 }

@@ -2,11 +2,9 @@
 
 ## Überblick
 
-`form_score = 100 * (0.40 * elo_adjusted_result + 0.40 * performance_component + 0.20 * trend_component)`
+`form_score = 100 * (0.40 * elo_adjusted_result + 0.35 * performance_component + 0.15 * trend_component + 0.10 * opponent_strength_component)`
 
 Alle Komponenten im Bereich `0..1`.
-
-Hinweis: Eine separate `opponent_strength_component` entfällt, da die Gegnerstärke bereits vollständig im `elo_adjusted_result` (Abschnitt 1.1) berücksichtigt wird.
 
 ## 1) Result Component (Basis)
 
@@ -33,7 +31,7 @@ Interpretation:
 - Punkte gegen starke Gegner zählen mehr.
 - Punkte gegen schwache Gegner zählen etwas weniger.
 
-## 2) Performance Component (40%)
+## 2) Performance Component (35%)
 
 Teilmetriken über letzte `n` Spiele:
 
@@ -47,7 +45,7 @@ Auf 0..1 normalisieren:
 
 `performance_component = 0.45 * norm(goal_balance) + 0.35 * norm(xg_balance) + 0.20 * norm(shot_quality)`
 
-## 3) Trend Component (20%)
+## 3) Trend Component (15%)
 
 Trend aus Vergleich der jüngsten 3 Spiele gegen die vorherigen 3:
 
@@ -59,14 +57,14 @@ Normalisierung:
 
 - `trend_component = clamp((delta + 3) / 6, 0, 1)`
 
-## 4) Cold-Start-Handling
+## 4) Opponent Strength Component (10%)
 
-Wenn weniger Spiele vorhanden sind als das gewählte Fenster (`last_5` / `last_10`):
+Durchschnittliche Gegnerstärke im Bewertungsfenster:
 
-- Berechnung erfolgt mit den tatsächlich verfügbaren Spielen.
-- `games_used` wird im Output festgehalten.
-- Bei `games_used < 3`: `confidence` wird auf maximal `0.5` begrenzt; `form_score_home` / `form_score_away` werden als `null` ausgegeben (zu wenig Split-Daten).
-- Saisongrenze: Spiele aus der Vorsaison werden nicht in das Fenster einbezogen.
+- `avg_opp_elo = mean(opponent_elo_last_n)`
+- `opponent_strength_component = clamp((avg_opp_elo - (league_elo_mean - 150)) / 300, 0, 1)`
+
+Damit wird der Spielplan-Kontext direkt berücksichtigt.
 
 ## 5) Home/Away Split
 
@@ -80,31 +78,18 @@ Für Elo:
 - Home-Scope nutzt primär `opponent_elo_away`
 - Away-Scope nutzt primär `opponent_elo_home`
 
-## 6) Home/Away Confidence
+## 6) Trend Label
 
-Split-Scores haben eine eigene Konfidenz, da sie auf weniger Spielen basieren:
+Aus `delta`:
 
-- `confidence_split = clamp(games_used_split / 5, 0.2, 1.0)`
-- Bei `games_used_split < 3`: Score wird als `null` ausgegeben.
+- `delta > 0.35` -> `up`
+- `delta < -0.35` -> `down`
+- sonst -> `flat`
 
-## 7) Trend Label
-
-Aus `delta` (PPG-Differenz in `[-3, 3]`):
-
-| delta          | Code (DB) | Anzeige (DE) |
-|----------------|-----------|--------------|
-| `> 0.35`       | `up`      | Aufwärts     |
-| `< -0.35`      | `down`    | Abwärts      |
-| sonst          | `flat`    | Stabil       |
-
-## 8) Bucket Label
+## 7) Bucket Label
 
 Aus `form_score`:
 
-| form_score    | Code (DB) | Anzeige (DE) |
-|---------------|-----------|--------------|
-| `< 40`        | `weak`    | Schwach      |
-| `40–69.99`    | `medium`  | Mittel       |
-| `>= 70`       | `strong`  | Stark        |
-
-DB-Enum-Wert: Englisch. Anzeige im Frontend: Deutsch (per i18n-Mapping).
+- `< 40` -> `schwach`
+- `40-69.99` -> `mittel`
+- `>= 70` -> `stark`

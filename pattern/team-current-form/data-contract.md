@@ -30,14 +30,9 @@ Aus `fixtures`:
 
 Aus `fixture_statistics` (Team pro Spiel):
 
-Pflicht (v1):
-
 - `expected_goals`
-- `shots_on_goal`
-
-Optional / future (v2+, in Formel noch nicht verwendet):
-
 - `shots_total`
+- `shots_on_goal`
 - `ball_possession`
 - `passes_total`
 - `pass_accuracy`
@@ -71,13 +66,12 @@ Aus `team_elo_snapshot`:
 - `window_size` (5/10)
 - `scope` (`overall`|`home`|`away`)
 - `form_score`
-- `games_used` (tatsächlich eingeflossene Spiele)
 - `result_score`
 - `performance_score`
 - `trend_score`
+- `opponent_strength_score`
 - `elo_adjusted_result_score`
-- `confidence` (0–1, reduziert bei wenig Daten oder Split)
 - `form_trend` (`up`|`flat`|`down`)
-- `form_bucket` (`weak`|`medium`|`strong`)
+- `form_bucket` (`schwach`|`mittel`|`stark`)
 - `computed_at`
 - `model_version` (z. B. `team_form_v1`)

@@ -305,3 +305,89 @@ async def sync_details_for_today(season_year: int = 2025) -> dict:
     summary = await sync_details_for_leagues(league_ids, season_year=season_year)
     summary["league_ids"] = league_ids
     return summary
+
+
+async def sync_details_for_date(
+    target_date,
+    season_year: int = 2025,
+    force: bool = False,
+) -> dict:
+    """Sync statistics + events for finished fixtures on a specific date."""
+    async with AsyncSessionLocal() as db:
+        stmt = (
+            select(Fixture.id)
+            .where(
+                Fixture.season_year == season_year,
+                cast(Fixture.kickoff_utc, Date) == target_date,
+                Fixture.status_short.in_(FINISHED_STATUSES),
+            )
+            .order_by(Fixture.kickoff_utc)
+        )
+        result = await db.execute(stmt)
+        fixture_ids = [row[0] for row in result.all()]
+
+    if not fixture_ids:
+        logger.info(f"No finished fixtures found for {target_date}")
+        return {"fetched": 0, "skipped": 0, "errors": 0, "api_calls": 0}
+
+    to_process: list[tuple[int, bool, bool]] = []
+    skipped = 0
+
+    if force:
+        to_process = [(fid, True, True) for fid in fixture_ids]
+    else:
+        async with AsyncSessionLocal() as db:
+            stats_ids, events_ids = await _load_existing_detail_sets(db, fixture_ids)
+        for fid in fixture_ids:
+            need_stats = fid not in stats_ids
+            need_events = fid not in events_ids
+            if not need_stats and not need_events:
+                skipped += 1
+                continue
+            to_process.append((fid, need_stats, need_events))
+
+    total = len(to_process)
+    estimated_calls = sum(int(ns) + int(ne) for _, ns, ne in to_process)
+    logger.info(
+        f"Details for {target_date}: {total} to fetch, {skipped} skipped "
+        f"(~{estimated_calls} API calls)"
+    )
+
+    if total == 0:
+        return {"fetched": 0, "skipped": skipped, "errors": 0, "api_calls": 0}
+
+    semaphore = asyncio.Semaphore(CONCURRENCY)
+    results = {"fetched": 0, "skipped": skipped, "errors": 0, "api_calls": 0}
+
+    async def process_fixture(fixture_id: int, need_stats: bool, need_events: bool) -> None:
+        async with semaphore:
+            calls_needed = int(need_stats) + int(need_events)
+            if calls_needed == 0:
+                return
+            async with AsyncSessionLocal() as db:
+                if not await budget_manager.can_spend(db, calls=calls_needed):
+                    logger.warning(f"Budget low, skipping fixture {fixture_id}")
+                    results["errors"] += 1
+                    return
+            try:
+                tasks = []
+                if need_stats:
+                    tasks.append(_fetch_and_store_statistics(fixture_id))
+                if need_events:
+                    tasks.append(_fetch_and_store_events(fixture_id))
+                responses = await asyncio.gather(*tasks, return_exceptions=True)
+                failures = [r for r in responses if isinstance(r, Exception)]
+                if failures:
+                    logger.error(f"Partial error for fixture {fixture_id}: {failures[0]}")
+                    results["errors"] += 1
+                else:
+                    results["fetched"] += 1
+                    results["api_calls"] += calls_needed
+            except Exception as exc:
+                logger.error(f"Error syncing fixture {fixture_id}: {exc}")
+                results["errors"] += 1
+
+    await asyncio.gather(*[
+        process_fixture(fid, ns, ne) for fid, ns, ne in to_process
+    ])
+    return results

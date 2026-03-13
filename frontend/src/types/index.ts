@@ -5,6 +5,7 @@ export interface League {
   tier: number
   current_season: number | null
   logo_url: string | null
+  is_active: boolean
 }
 
 export interface Fixture {
@@ -180,6 +181,134 @@ export interface FixtureDetails {
   team_injury_impact_away: number
   statistics: FixtureStatistic[]
   events: FixtureEvent[]
+  pattern_evaluation: PatternEvaluation | null
+  h2h: {
+    matches_total: number
+    home_wins: number
+    draws: number
+    away_wins: number
+    home_win_pct: number
+    draw_pct: number
+    away_win_pct: number
+    avg_goals_home: number
+    avg_goals_away: number
+    avg_total_goals: number
+    btts_rate: number
+    over_25_rate: number
+    h2h_score: number
+  } | null
+  goal_timing_home: {
+    games_played: number
+    goals_scored: number
+    timing_attack: Record<string, { goals: number; rate: number; index: number }> | null
+    ht_attack_ratio: number | null
+    profil_typ: string | null
+    p_goal_first_30: number | null
+    p_goal_last_15: number | null
+  } | null
+  goal_timing_away: {
+    games_played: number
+    goals_scored: number
+    timing_attack: Record<string, { goals: number; rate: number; index: number }> | null
+    ht_attack_ratio: number | null
+    profil_typ: string | null
+    p_goal_first_30: number | null
+    p_goal_last_15: number | null
+  } | null
+  home_advantage_home: {
+    home_ppg: number
+    away_ppg: number
+    advantage_factor: number
+    normalized_factor: number
+    tier: string
+    games_home: number
+    games_away: number
+  } | null
+  home_advantage_away: {
+    home_ppg: number
+    away_ppg: number
+    advantage_factor: number
+    normalized_factor: number
+    tier: string
+    games_home: number
+    games_away: number
+  } | null
+  scoreline_distribution: {
+    lambda_home: number
+    lambda_away: number
+    p_home_win: number
+    p_draw: number
+    p_away_win: number
+    p_btts: number
+    p_over_15: number
+    p_over_25: number
+    p_over_35: number
+    p_home_clean_sheet: number
+    p_away_clean_sheet: number
+    most_likely_score: string | null
+    most_likely_score_prob: number
+  } | null
+  match_result_probability: {
+    p_home_win: number
+    p_draw: number
+    p_away_win: number
+    p_btts: number
+    p_over_25: number
+    p_over_15: number
+    p_over_35: number
+    confidence: number
+    elo_home_prob: number | null
+    elo_away_prob: number | null
+  } | null
+  value_bets: Array<{
+    market_name: string
+    bet_value: string
+    model_prob: number
+    bookmaker_odd: number
+    implied_prob: number
+    edge: number
+    expected_value: number
+    kelly_fraction: number
+    fair_odd: number
+    tier: string
+  }> | null
+}
+
+export interface PatternEvaluation {
+  actual_outcome: 'H' | 'D' | 'A'
+  predicted_outcome: 'H' | 'D' | 'A'
+  outcome_correct: boolean
+  p_home_win: number
+  p_draw: number
+  p_away_win: number
+  p_actual_outcome: number
+  log_loss: number
+  brier_score: number
+  predicted_total_goals: number
+  actual_total_goals: number
+  goals_diff: number
+  dc_prediction: string | null
+  dc_prob: number | null
+  dc_correct: boolean | null
+  p_over_25: number
+  predicted_over_25: boolean
+  actual_over_25: boolean
+  over_25_correct: boolean
+  p_over_15: number | null
+  over_15_correct: boolean | null
+  p_btts: number
+  predicted_btts: boolean
+  actual_btts: boolean
+  btts_correct: boolean
+  p_home_scores: number | null
+  home_scores_correct: boolean | null
+  p_away_scores: number | null
+  away_scores_correct: boolean | null
+  predicted_score: string | null
+  predicted_score_prob: number | null
+  actual_score: string
+  score_correct: boolean
+  computed_at: string | null
 }
 
 export interface TeamLastMatch {

@@ -23,6 +23,9 @@ class FixtureGoalProbability(Base):
     confidence: Mapped[float] = mapped_column(Numeric(6, 4), nullable=False, default=0.2)
     sample_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # p_btts: probability both teams score = p_ge_1_home * p_ge_1_away * 0.95 (correlation discount)
+    p_btts: Mapped[float | None] = mapped_column(Numeric(6, 4), nullable=True, default=None)
+
     computed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     model_version: Mapped[str] = mapped_column(String(40), nullable=False, default="goal_prob_v1")
 

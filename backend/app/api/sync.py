@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, date
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends
 from pydantic import BaseModel
@@ -7,15 +7,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.sync.budget_manager import budget_manager
-from app.sync.leagues_config import LEAGUE_IDS
+from app.sync.leagues_config import LEAGUE_IDS, CUP_COMPANIONS
 from app.sync.jobs.sync_injuries import sync_injuries_for_today
-from app.sync.jobs.sync_goal_probability import sync_goal_probability_for_today
+from app.sync.jobs.sync_goal_probability import sync_goal_probability_for_today, backfill_goal_probability_for_season
 from app.sync.jobs.sync_predictions import sync_predictions_for_today
-from app.sync.jobs.sync_fixtures import sync_all_fixtures
-from app.sync.jobs.sync_fixture_details import sync_details_for_today, sync_details_for_leagues
+from app.sync.jobs.sync_fixtures import sync_all_fixtures, sync_league_fixtures, sync_fixtures_for_date
+from app.sync.jobs.sync_fixture_details import sync_details_for_today, sync_details_for_leagues, sync_details_for_date
 from app.sync.jobs.sync_odds import sync_odds_for_today, DEFAULT_BOOKMAKER_ID
+from app.sync.leagues_config import LEAGUES
 from app.services.team_elo_service import recompute_team_elo_for_league
 from app.services.team_form_service import recompute_team_form_for_league
+from app.services.goal_timing_service import compute_goal_timing_for_league
+from app.services.home_advantage_service import compute_home_advantage_for_league
+from app.services.h2h_service import compute_h2h_for_league
+from app.services.scoreline_service import compute_scoreline_for_league
+from app.services.match_result_probability_service import compute_match_result_for_league
+from app.services.value_bet_service import compute_value_bets_for_league
+from app.services.team_profile_service import compute_team_profiles_for_league
+from app.services.evaluation_service import evaluate_for_date, evaluate_backfill
 
 router = APIRouter(prefix="/sync", tags=["Sync"])
 logger = logging.getLogger(__name__)
@@ -54,6 +63,12 @@ class DetailsResult(BaseModel):
     league_ids: list[int] = []
 
 
+class PatternComputeResult(BaseModel):
+    message: str
+    season_year: int
+    league_results: list[dict] = []
+
+
 class PredictionsResult(BaseModel):
     message: str
     season_year: int
@@ -72,6 +87,18 @@ class InjuriesResult(BaseModel):
     skipped: int
     errors: int
     api_calls: int
+
+
+class OddsResult(BaseModel):
+    message: str
+    season_year: int
+    bookmaker_id: int
+    fixtures_today: int
+    fetched: int
+    skipped: int
+    errors: int
+    api_calls: int
+    bet_rows: int
 
 
 class EloSyncRow(BaseModel):
@@ -392,7 +419,10 @@ async def trigger_elo_recompute(
     league_ids = [league_id] if league_id is not None else LEAGUE_IDS
     results: list[EloSyncRow] = []
     for lid in league_ids:
-        row = await recompute_team_elo_for_league(db, league_id=lid, season_year=season_year)
+        row = await recompute_team_elo_for_league(
+            db, league_id=lid, season_year=season_year,
+            extra_league_ids=CUP_COMPANIONS.get(lid),
+        )
         results.append(EloSyncRow(
             league_id=row["league_id"],
             season_year=row["season_year"],
@@ -423,6 +453,7 @@ async def trigger_form_recompute(
             league_id=lid,
             season_year=season_year,
             window_size=window_size,
+            extra_league_ids=CUP_COMPANIONS.get(lid),
         )
         results.append(FormSyncRow(
             league_id=row["league_id"],
@@ -465,43 +496,53 @@ async def trigger_goal_probability_today_run(
     )
 
 
-class OddsResult(BaseModel):
-    message: str
-    season_year: int
-    bookmaker_id: int
-    fixtures_today: int
-    fetched: int
-    skipped: int
-    errors: int
-    api_calls: int
-    bet_rows: int
-
-
-@router.post("/odds/today", response_model=OddsResult)
-async def trigger_odds_today(
-    background_tasks: BackgroundTasks,
+@router.post("/goal-probability/backfill")
+async def goal_probability_backfill(
     season_year: int = 2025,
-    bookmaker_id: int = DEFAULT_BOOKMAKER_ID,
     force: bool = False,
 ):
-    """Startet Odds-Sync für alle heutigen Fixtures im Hintergrund."""
+    """
+    Rückwirkend FixtureGoalProbability für alle abgeschlossenen Spiele der Saison berechnen.
+    Kein API-Budget — reiner DB-Vorgang. Nötig für H/A⚽-Auswertung abgelaufener Spiele.
+    """
+    result = await backfill_goal_probability_for_season(season_year=season_year, force=force)
+    return {
+        "message": f"Goal-Probability Backfill Saison {season_year} abgeschlossen.",
+        **result,
+    }
+
+
+@router.post("/fixtures/leagues/run", response_model=SyncResult)
+async def trigger_fixture_sync_for_leagues(
+    league_ids: list[int],
+    season_year: int | None = None,
+):
+    """Fixture-Sync nur für bestimmte Ligen (synchron)."""
     global _sync_running
     if _sync_running:
         raise HTTPException(status_code=409, detail="Sync läuft bereits.")
 
-    async def run():
-        global _sync_running
-        _sync_running = True
-        try:
-            await sync_odds_for_today(season_year=season_year, bookmaker_id=bookmaker_id, force=force)
-        finally:
-            _sync_running = False
+    now = datetime.utcnow()
+    effective_season = season_year or (now.year if now.month >= 7 else now.year - 1)
 
-    background_tasks.add_task(run)
-    return OddsResult(
-        message=f"Odds-Sync für heute gestartet (Bookmaker {bookmaker_id}, Hintergrund).",
-        season_year=season_year, bookmaker_id=bookmaker_id,
-        fixtures_today=0, fetched=0, skipped=0, errors=0, api_calls=0, bet_rows=0,
+    league_map = {l["id"]: l for l in LEAGUES}
+    unknown = [lid for lid in league_ids if lid not in league_map]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unbekannte Liga-IDs: {unknown}")
+
+    _sync_running = True
+    try:
+        results = []
+        for lid in league_ids:
+            row = await sync_league_fixtures(league_map[lid], effective_season)
+            results.append(row)
+    finally:
+        _sync_running = False
+
+    return SyncResult(
+        message=f"Fixture-Sync für Ligen {league_ids} abgeschlossen.",
+        season_year=effective_season,
+        results=results,
     )
 
 
@@ -511,7 +552,7 @@ async def trigger_odds_today_run(
     bookmaker_id: int = DEFAULT_BOOKMAKER_ID,
     force: bool = False,
 ):
-    """Startet Odds-Sync für alle heutigen Fixtures synchron und wartet auf Ergebnis."""
+    """Odds-Sync (Betano) für alle heutigen Fixtures – synchron."""
     global _sync_running
     if _sync_running:
         raise HTTPException(status_code=409, detail="Sync läuft bereits.")
@@ -533,3 +574,345 @@ async def trigger_odds_today_run(
         api_calls=result.get("api_calls", 0),
         bet_rows=result.get("bet_rows", 0),
     )
+
+
+# ─── Pattern Compute Endpoints ───────────────────────────────────────────────
+
+@router.post("/patterns/goal-timing/run", response_model=PatternComputeResult)
+async def trigger_goal_timing(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Berechnet Torzeit-Verteilung für alle Teams aus fixture_events (0 API Calls)."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        r = await compute_goal_timing_for_league(db, lid, season_year, extra_league_ids=CUP_COMPANIONS.get(lid))
+        results.append({"league_id": lid, **r})
+    return PatternComputeResult(
+        message=f"GoalTiming für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+@router.post("/patterns/home-advantage/run", response_model=PatternComputeResult)
+async def trigger_home_advantage(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Berechnet team-spezifischen Heimvorteil-Faktor (0 API Calls)."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        r = await compute_home_advantage_for_league(db, lid, season_year, extra_league_ids=CUP_COMPANIONS.get(lid))
+        results.append({"league_id": lid, **r})
+    return PatternComputeResult(
+        message=f"HomeAdvantage für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+@router.post("/patterns/h2h/run", response_model=PatternComputeResult)
+async def trigger_h2h(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Berechnet H2H-Stats für alle Fixtures aus bestehenden DB-Daten (0 API Calls)."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        r = await compute_h2h_for_league(db, lid, season_year)
+        results.append({"league_id": lid, **r})
+    return PatternComputeResult(
+        message=f"H2H für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+@router.post("/patterns/scoreline/run", response_model=PatternComputeResult)
+async def trigger_scoreline(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Berechnet Scoreline-Verteilung für alle Fixtures via Poisson (0 API Calls)."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        r = await compute_scoreline_for_league(db, lid, season_year)
+        results.append({"league_id": lid, **r})
+    return PatternComputeResult(
+        message=f"Scoreline für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+@router.post("/patterns/match-result/run", response_model=PatternComputeResult)
+async def trigger_match_result(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Berechnet finale 1X2+BTTS+O/U Wahrscheinlichkeiten kombiniert aus allen Sub-Pattern."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        r = await compute_match_result_for_league(db, lid, season_year)
+        results.append({"league_id": lid, **r})
+    return PatternComputeResult(
+        message=f"MatchResultProbability für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+@router.post("/patterns/value-bets/run", response_model=PatternComputeResult)
+async def trigger_value_bets(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Identifiziert Value Bets durch Vergleich Modell-Prob vs. Betano-Quoten."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        r = await compute_value_bets_for_league(db, lid, season_year)
+        results.append({"league_id": lid, **r})
+    return PatternComputeResult(
+        message=f"ValueBets für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+@router.post("/patterns/team-profiles/run", response_model=PatternComputeResult)
+async def trigger_team_profiles(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Berechnet Team-Saisonprofile (Angriff, Abwehr, Spielstil, Ratings) für alle Ligen."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        r = await compute_team_profiles_for_league(db, lid, season_year)
+        results.append({"league_id": lid, **r})
+    return PatternComputeResult(
+        message=f"Team-Profile für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+@router.post("/patterns/all/run", response_model=PatternComputeResult)
+async def trigger_all_patterns(
+    league_ids: list[int] | None = None,
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """Berechnet alle Pattern (GoalTiming + HomeAdv + H2H + Scoreline + MRP + ValueBets + TeamProfiles)."""
+    ids = league_ids or LEAGUE_IDS
+    results = []
+    for lid in ids:
+        companions = CUP_COMPANIONS.get(lid)
+        gt  = await compute_goal_timing_for_league(db, lid, season_year, extra_league_ids=companions)
+        ha  = await compute_home_advantage_for_league(db, lid, season_year, extra_league_ids=companions)
+        h2h = await compute_h2h_for_league(db, lid, season_year)
+        sl  = await compute_scoreline_for_league(db, lid, season_year)
+        mrp = await compute_match_result_for_league(db, lid, season_year)
+        vb  = await compute_value_bets_for_league(db, lid, season_year)
+        tp  = await compute_team_profiles_for_league(db, lid, season_year)
+        results.append({
+            "league_id": lid,
+            "goal_timing_teams": gt.get("teams", 0),
+            "home_advantage_teams": ha.get("teams", 0),
+            "h2h_fixtures": h2h.get("fixtures", 0),
+            "scoreline_computed": sl.get("computed", 0),
+            "mrp_computed": mrp.get("computed", 0),
+            "value_bets_found": vb.get("total_bets", 0),
+            "value_bets_fixtures": vb.get("fixtures_with_bets", 0),
+            "team_profiles_computed": tp.get("computed", 0),
+        })
+    return PatternComputeResult(
+        message=f"Alle Pattern für {len(ids)} Ligen berechnet.",
+        season_year=season_year,
+        league_results=results,
+    )
+
+
+# ─── Pattern Evaluation ───────────────────────────────────────────────────────
+
+@router.post("/evaluate/run")
+async def trigger_evaluate(
+    target_date: date | None = None,
+    season_year: int = 2025,
+):
+    """
+    Bewertet die Pattern-Genauigkeit für alle abgeschlossenen Spiele eines Datums.
+    Standard: gestern. Metriken: 1X2-Treffer, Brier-Score, Over/Under, BTTS, Ergebnis.
+    """
+    d = target_date or (date.today() - timedelta(days=1))
+    result = await evaluate_for_date(d, season_year)
+    return {"message": f"Evaluation für {d} abgeschlossen.", "date": str(d), **result}
+
+
+@router.post("/evaluate/backfill")
+async def trigger_evaluate_backfill(
+    season_year: int = 2025,
+    force: bool = False,
+):
+    """
+    Berechnet die Pattern-Evaluation rückwirkend für alle abgeschlossenen Fixtures
+    mit MRP-Daten der angegebenen Saison.
+
+    - force=false (Standard): überspringt bereits bewertete Fixtures
+    - force=true: überschreibt alle bestehenden Evaluierungen
+    """
+    result = await evaluate_backfill(season_year=season_year, force=force)
+    return {
+        "message": f"Backfill abgeschlossen (Saison {season_year}, force={force}).",
+        "season_year": season_year,
+        **result,
+    }
+
+
+# ─── Morning Routine ──────────────────────────────────────────────────────────
+
+class MorningRoutineResult(BaseModel):
+    message: str
+    season_year: int
+    yesterday: date
+    yesterday_fixtures_synced: int
+    yesterday_details: dict
+    yesterday_evaluation: dict
+    predictions: dict
+    injuries: dict
+    elo: list[dict]
+    form: list[dict]
+    goal_probability: dict
+    patterns: list[dict]
+
+
+@router.post("/morning-routine/run", response_model=MorningRoutineResult)
+async def trigger_morning_routine(
+    season_year: int = 2025,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Tägliche Morgen-Routine – führt alle Sync- und Recompute-Schritte in der richtigen
+    Reihenfolge aus:
+
+    1. Gestrige Fixture-Ergebnisse aktualisieren (Scores, Status)
+    2. Stats + Events für gestrige abgeschlossene Spiele laden
+    3. Predictions für heutige Fixtures laden
+    4. Injuries für heutige Fixtures laden
+    5. Elo + Form für alle Ligen recomputen (basieren auf finalen Ergebnissen)
+    6. Goal-Probability für heutige Fixtures berechnen
+    7. Alle 6 Pattern recomputen (GoalTiming, HomeAdv, H2H, Scoreline, MRP, ValueBets)
+    """
+    global _sync_running
+    if _sync_running:
+        raise HTTPException(status_code=409, detail="Sync läuft bereits.")
+
+    _sync_running = True
+    yesterday = date.today() - timedelta(days=1)
+
+    try:
+        # ── 1. Gestrige Fixture-Ergebnisse aktualisieren ──────────────────────
+        logger.info("[MorningRoutine] Step 1: Sync yesterday's fixture results")
+        yesterday_league_results = await sync_fixtures_for_date(yesterday, season_year)
+        yesterday_fixtures_synced = sum(r.get("count", 0) for r in yesterday_league_results)
+
+        # ── 2. Stats + Events für gestrige Spiele ────────────────────────────
+        logger.info("[MorningRoutine] Step 2: Sync stats+events for yesterday")
+        yesterday_details = await sync_details_for_date(yesterday, season_year, force=False)
+
+        # ── 2b. Pattern-Evaluation für gestrige Spiele ───────────────────────
+        logger.info("[MorningRoutine] Step 2b: Evaluate pattern accuracy for yesterday")
+        yesterday_evaluation = await evaluate_for_date(yesterday, season_year)
+
+        # ── 3. Predictions für heute ─────────────────────────────────────────
+        logger.info("[MorningRoutine] Step 3: Sync predictions for today")
+        predictions_result = await sync_predictions_for_today(season_year=season_year, force=False)
+
+        # ── 4. Injuries für heute ─────────────────────────────────────────────
+        logger.info("[MorningRoutine] Step 4: Sync injuries for today")
+        injuries_result = await sync_injuries_for_today(season_year=season_year)
+
+        # ── 5. Elo + Form recomputen ──────────────────────────────────────────
+        logger.info("[MorningRoutine] Step 5: Recompute Elo + Form for all leagues")
+        elo_results = []
+        form_results = []
+        for lid in LEAGUE_IDS:
+            companions = CUP_COMPANIONS.get(lid)
+            elo_row = await recompute_team_elo_for_league(
+                db, league_id=lid, season_year=season_year, extra_league_ids=companions,
+            )
+            elo_results.append(elo_row)
+            form_row = await recompute_team_form_for_league(
+                db, league_id=lid, season_year=season_year, extra_league_ids=companions,
+            )
+            form_results.append(form_row)
+
+        # ── 6. Goal-Probability für heute ────────────────────────────────────
+        logger.info("[MorningRoutine] Step 6: Compute goal probability for today")
+        goal_prob_result = await sync_goal_probability_for_today(season_year=season_year, force=False)
+
+        # ── 7. Alle 6 Pattern recomputen ─────────────────────────────────────
+        logger.info("[MorningRoutine] Step 7: Recompute all 6 patterns for all leagues")
+        pattern_results = []
+        for lid in LEAGUE_IDS:
+            companions = CUP_COMPANIONS.get(lid)
+            gt  = await compute_goal_timing_for_league(db, lid, season_year, extra_league_ids=companions)
+            ha  = await compute_home_advantage_for_league(db, lid, season_year, extra_league_ids=companions)
+            h2h = await compute_h2h_for_league(db, lid, season_year)
+            sl  = await compute_scoreline_for_league(db, lid, season_year)
+            mrp = await compute_match_result_for_league(db, lid, season_year)
+            vb  = await compute_value_bets_for_league(db, lid, season_year)
+            pattern_results.append({
+                "league_id": lid,
+                "goal_timing_teams": gt.get("teams", 0),
+                "home_advantage_teams": ha.get("teams", 0),
+                "h2h_fixtures": h2h.get("fixtures", 0),
+                "scoreline_computed": sl.get("computed", 0),
+                "mrp_computed": mrp.get("computed", 0),
+                "value_bets_found": vb.get("total_bets", 0),
+                "value_bets_fixtures": vb.get("fixtures_with_bets", 0),
+            })
+
+        logger.info("[MorningRoutine] Complete.")
+        return MorningRoutineResult(
+            message="Morgen-Routine erfolgreich abgeschlossen.",
+            season_year=season_year,
+            yesterday=yesterday,
+            yesterday_fixtures_synced=yesterday_fixtures_synced,
+            yesterday_details=yesterday_details,
+            yesterday_evaluation=yesterday_evaluation,
+            predictions={
+                "fixtures_today": predictions_result.get("fixtures_today", 0),
+                "fetched": predictions_result.get("fetched", 0),
+                "skipped": predictions_result.get("skipped", 0),
+                "errors": predictions_result.get("errors", 0),
+                "api_calls": predictions_result.get("api_calls", 0),
+            },
+            injuries={
+                "fixtures_today": injuries_result.get("fixtures_today", 0),
+                "fetched": injuries_result.get("fetched", 0),
+                "errors": injuries_result.get("errors", 0),
+                "api_calls": injuries_result.get("api_calls", 0),
+            },
+            elo=elo_results,
+            form=form_results,
+            goal_probability=goal_prob_result,
+            patterns=pattern_results,
+        )
+
+    finally:
+        _sync_running = False

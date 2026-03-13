@@ -1,0 +1,25 @@
+/* Global styles */
+
+/* Live match pulse animation */
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(0, 230, 118, 0.35); }
+  50%       { box-shadow: 0 0 0 6px rgba(0, 230, 118, 0.0); }
+}
+.live-pulse {
+  animation: live-pulse 1.8s ease-in-out infinite;
+}
+
+/* Match row hover effect */
+.match-row-hover:hover {
+  background-color: light-dark(#f8f9fa, rgba(255,255,255,0.03));
+}
+
+/* Sidebar league item hover */
+.sidebar-league-item:hover {
+  background-color: light-dark(#f1f3f5, rgba(255, 255, 255, 0.05));
+}
+
+/* Mantine tab styling override for header nav */
+.mantine-Tabs-tab[data-active] {
+  border-bottom-color: var(--mantine-primary-color-filled) !important;
+}

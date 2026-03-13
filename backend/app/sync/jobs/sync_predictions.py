@@ -17,13 +17,23 @@ JOB_NAME = "sync_predictions_today"
 CONCURRENCY = 12
 
 
-def _parse_pct(value: str | None) -> float | None:
+def _parse_pct(value) -> float | None:
     if value is None:
         return None
     try:
         return float(str(value).replace("%", "").strip())
     except (TypeError, ValueError):
         return None
+
+
+def _f(d: dict, *keys):
+    """Safe nested dict access, returns None if any key is missing."""
+    v = d
+    for k in keys:
+        if not isinstance(v, dict):
+            return None
+        v = v.get(k)
+    return v
 
 
 async def _fetch_and_store_prediction(fixture_id: int) -> bool:
@@ -36,11 +46,20 @@ async def _fetch_and_store_prediction(fixture_id: int) -> bool:
     if not response:
         return False
 
-    pred = response[0].get("predictions", {})
+    entry = response[0]
+    pred = entry.get("predictions") or {}
     winner = pred.get("winner") or {}
     percent = pred.get("percent") or {}
+    goals_pred = pred.get("goals") or {}
+    cmp = entry.get("comparison") or {}
+    home_t = _f(entry, "teams", "home") or {}
+    away_t = _f(entry, "teams", "away") or {}
+    home_l5 = home_t.get("last_5") or {}
+    away_l5 = away_t.get("last_5") or {}
+    home_lg = home_t.get("league") or {}
+    away_lg = away_t.get("league") or {}
 
-    stmt = pg_insert(FixturePrediction).values(
+    values = dict(
         fixture_id=fixture_id,
         winner_team_id=winner.get("id"),
         winner_name=winner.get("name"),
@@ -51,25 +70,66 @@ async def _fetch_and_store_prediction(fixture_id: int) -> bool:
         percent_home=_parse_pct(percent.get("home")),
         percent_draw=_parse_pct(percent.get("draw")),
         percent_away=_parse_pct(percent.get("away")),
-        raw_json=response[0],
+        goals_pred_home=goals_pred.get("home"),
+        goals_pred_away=goals_pred.get("away"),
+        # Comparison
+        cmp_form_home=_parse_pct(_f(cmp, "form", "home")),
+        cmp_form_away=_parse_pct(_f(cmp, "form", "away")),
+        cmp_att_home=_parse_pct(_f(cmp, "att", "home")),
+        cmp_att_away=_parse_pct(_f(cmp, "att", "away")),
+        cmp_def_home=_parse_pct(_f(cmp, "def", "home")),
+        cmp_def_away=_parse_pct(_f(cmp, "def", "away")),
+        cmp_poisson_home=_parse_pct(_f(cmp, "poisson_distribution", "home")),
+        cmp_poisson_away=_parse_pct(_f(cmp, "poisson_distribution", "away")),
+        cmp_h2h_home=_parse_pct(_f(cmp, "h2h", "home")),
+        cmp_h2h_away=_parse_pct(_f(cmp, "h2h", "away")),
+        cmp_goals_home=_parse_pct(_f(cmp, "goals", "home")),
+        cmp_goals_away=_parse_pct(_f(cmp, "goals", "away")),
+        cmp_total_home=_parse_pct(_f(cmp, "total", "home")),
+        cmp_total_away=_parse_pct(_f(cmp, "total", "away")),
+        # Last 5
+        home_last5_form=_parse_pct(home_l5.get("form")),
+        home_last5_att=_parse_pct(home_l5.get("att")),
+        home_last5_def=_parse_pct(home_l5.get("def")),
+        home_last5_goals_for_avg=_f(home_l5, "goals", "for", "average"),
+        home_last5_goals_against_avg=_f(home_l5, "goals", "against", "average"),
+        away_last5_form=_parse_pct(away_l5.get("form")),
+        away_last5_att=_parse_pct(away_l5.get("att")),
+        away_last5_def=_parse_pct(away_l5.get("def")),
+        away_last5_goals_for_avg=_f(away_l5, "goals", "for", "average"),
+        away_last5_goals_against_avg=_f(away_l5, "goals", "against", "average"),
+        # Season – home
+        home_season_form=home_lg.get("form"),
+        home_clean_sheet_home=_f(home_lg, "clean_sheet", "home"),
+        home_clean_sheet_away=_f(home_lg, "clean_sheet", "away"),
+        home_clean_sheet_total=_f(home_lg, "clean_sheet", "total"),
+        home_failed_to_score_total=_f(home_lg, "failed_to_score", "total"),
+        home_wins_home=_f(home_lg, "fixtures", "wins", "home"),
+        home_wins_away=_f(home_lg, "fixtures", "wins", "away"),
+        home_draws_total=_f(home_lg, "fixtures", "draws", "total"),
+        home_loses_total=_f(home_lg, "fixtures", "loses", "total"),
+        home_goals_for_avg_total=_f(home_lg, "goals", "for", "average", "total"),
+        home_goals_against_avg_total=_f(home_lg, "goals", "against", "average", "total"),
+        # Season – away
+        away_season_form=away_lg.get("form"),
+        away_clean_sheet_home=_f(away_lg, "clean_sheet", "home"),
+        away_clean_sheet_away=_f(away_lg, "clean_sheet", "away"),
+        away_clean_sheet_total=_f(away_lg, "clean_sheet", "total"),
+        away_failed_to_score_total=_f(away_lg, "failed_to_score", "total"),
+        away_wins_home=_f(away_lg, "fixtures", "wins", "home"),
+        away_wins_away=_f(away_lg, "fixtures", "wins", "away"),
+        away_draws_total=_f(away_lg, "fixtures", "draws", "total"),
+        away_loses_total=_f(away_lg, "fixtures", "loses", "total"),
+        away_goals_for_avg_total=_f(away_lg, "goals", "for", "average", "total"),
+        away_goals_against_avg_total=_f(away_lg, "goals", "against", "average", "total"),
+        raw_json=entry,
         fetched_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
-    ).on_conflict_do_update(
+    )
+
+    stmt = pg_insert(FixturePrediction).values(**values).on_conflict_do_update(
         constraint="uq_fixture_predictions_fixture_id",
-        set_={
-            "winner_team_id": winner.get("id"),
-            "winner_name": winner.get("name"),
-            "winner_comment": winner.get("comment"),
-            "win_or_draw": pred.get("win_or_draw"),
-            "under_over": pred.get("under_over"),
-            "advice": pred.get("advice"),
-            "percent_home": _parse_pct(percent.get("home")),
-            "percent_draw": _parse_pct(percent.get("draw")),
-            "percent_away": _parse_pct(percent.get("away")),
-            "raw_json": response[0],
-            "fetched_at": datetime.utcnow(),
-            "updated_at": datetime.utcnow(),
-        },
+        set_={k: v for k, v in values.items() if k != "fixture_id"},
     )
 
     async with AsyncSessionLocal() as db:

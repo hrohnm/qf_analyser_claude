@@ -11,6 +11,8 @@ from app.api.leagues import router as leagues_router
 from app.api.players import router as players_router
 from app.api.standings import router as standings_router
 from app.api.teams import router as teams_router
+from app.api.betting_slips import router as betting_slips_router
+from app.api.admin import router as admin_router
 from app.sync.client import api_client
 
 logging.basicConfig(
@@ -48,6 +50,8 @@ app.include_router(leagues_router, prefix="/api")
 app.include_router(players_router, prefix="/api")
 app.include_router(standings_router, prefix="/api")
 app.include_router(teams_router, prefix="/api")
+app.include_router(betting_slips_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 
 
 @app.get("/")

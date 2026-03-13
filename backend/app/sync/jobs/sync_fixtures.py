@@ -155,6 +155,57 @@ async def sync_league_fixtures(league_cfg: dict, season_year: int) -> dict:
     return {"league_id": league_id, "league_name": league_cfg["name"], "count": len(fixtures)}
 
 
+async def sync_fixtures_for_date(target_date, season_year: int = 2025) -> list[dict]:
+    """
+    Sync fixtures only for leagues that have games on target_date.
+    Used to refresh yesterday's results without a full 18-league sweep.
+    Returns per-league result dicts (same shape as sync_all_fixtures).
+    """
+    from sqlalchemy import cast, Date as SADate
+
+    async with AsyncSessionLocal() as db:
+        stmt = (
+            select(Fixture.league_id)
+            .where(cast(Fixture.kickoff_utc, SADate) == target_date)
+            .distinct()
+        )
+        result = await db.execute(stmt)
+        league_ids = {row[0] for row in result.all()}
+
+    if not league_ids:
+        logger.info(f"No fixtures found for {target_date} in DB – nothing to refresh.")
+        return []
+
+    league_map = {l["id"]: l for l in LEAGUES}
+    leagues_to_sync = [league_map[lid] for lid in league_ids if lid in league_map]
+
+    logger.info(
+        f"Refreshing {len(leagues_to_sync)} leagues for date {target_date}: "
+        f"{[l['name'] for l in leagues_to_sync]}"
+    )
+
+    db_semaphore = asyncio.Semaphore(6)
+
+    async def safe_sync(league_cfg: dict) -> dict:
+        async with db_semaphore:
+            for attempt in range(1, 4):
+                try:
+                    return await sync_league_fixtures(league_cfg, season_year)
+                except Exception as exc:
+                    if attempt < 3 and "deadlock" in str(exc).lower():
+                        await asyncio.sleep(attempt * 2)
+                        continue
+                    logger.error(f"Failed to sync {league_cfg['name']}: {exc}")
+                    return {
+                        "league_id": league_cfg["id"],
+                        "league_name": league_cfg["name"],
+                        "error": str(exc),
+                    }
+
+    results = await asyncio.gather(*[safe_sync(lc) for lc in leagues_to_sync])
+    return list(results)
+
+
 async def sync_all_fixtures(season_year: int | None = None) -> list[dict]:
     """
     Sync current season fixtures for all 18 leagues in parallel.

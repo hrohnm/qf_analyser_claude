@@ -1,11 +1,6 @@
 """
-Sync pre-match odds from a single bookmaker (default: Betano) for today's fixtures.
-
-Strategy: 1 API call per fixture (fixture + bookmaker filter).
-Each call returns all bet types for that bookmaker → stored per bet_id.
-
-We store only the TARGET_BET_IDS we actually need; all others are discarded.
-Approximate cost: 1 call/fixture → ~20 calls for a typical day.
+Sync pre-match odds from Betano (bookmaker_id=32) for today's fixtures.
+1 API call per fixture; bookmaker filter reduces response size.
 """
 import asyncio
 import logging
@@ -24,31 +19,12 @@ logger = logging.getLogger(__name__)
 
 JOB_NAME = "sync_odds_today"
 CONCURRENCY = 6
+DEFAULT_BOOKMAKER_ID = 32  # Betano
 
-# Default bookmaker: Betano (api-football bookmaker ID 32)
-DEFAULT_BOOKMAKER_ID = 32
-
-# Bet types we store – verified against Betano response (bookmaker_id=32).
-# api-football bet IDs:
-#   1   = Match Winner (1X2)
-#   5   = Goals Over/Under (total, full game)
-#   6   = Goals Over/Under – First Half (total)
-#   12  = Double Chance
-#   16  = Total – Home  (home team goals O/U, full game)
-#   17  = Total – Away  (away team goals O/U, full game)
-#   26  = Goals Over/Under – Second Half (total)
-#   105 = Home Team Total Goals – 1st Half
-#   106 = Away Team Total Goals – 1st Half
-#   218 = Away Anytime Goal Scorer  (player names + odds)
-#   219 = Away First Goal Scorer
-#   231 = Home Anytime Goal Scorer  (player names + odds)
-#   232 = Home First Goal Scorer
 TARGET_BET_IDS: set[int] = {1, 5, 6, 12, 16, 17, 26, 105, 106, 218, 219, 231, 232}
 
 
 async def _fetch_and_store_odds(fixture_id: int, bookmaker_id: int) -> int:
-    """Fetch all odds for one fixture/bookmaker and upsert TARGET_BET_IDS into DB.
-    Returns number of bet rows stored."""
     data = await api_client.get(
         "/odds",
         params={"fixture": fixture_id, "bookmaker": bookmaker_id},
@@ -56,7 +32,6 @@ async def _fetch_and_store_odds(fixture_id: int, bookmaker_id: int) -> int:
     )
     results = data.get("response", [])
     if not results:
-        logger.debug("No odds returned for fixture %s bookmaker %s", fixture_id, bookmaker_id)
         return 0
 
     stored = 0
@@ -100,12 +75,7 @@ async def sync_odds_for_today(
     bookmaker_id: int = DEFAULT_BOOKMAKER_ID,
     force: bool = False,
 ) -> dict:
-    """
-    Fetch and store Betano odds for all today's fixtures.
-    If force=False, skips fixtures that already have odds for this bookmaker.
-    """
     today = date.today()
-
     async with AsyncSessionLocal() as db:
         fixture_ids: list[int] = [
             row[0] for row in (
@@ -121,9 +91,8 @@ async def sync_odds_for_today(
         ]
 
     if not fixture_ids:
-        return {"fixtures_today": 0, "fetched": 0, "skipped": 0, "errors": 0, "api_calls": 0}
+        return {"fixtures_today": 0, "fetched": 0, "skipped": 0, "errors": 0, "api_calls": 0, "bet_rows": 0}
 
-    # Skip fixtures that already have odds (unless force=True)
     if not force:
         async with AsyncSessionLocal() as db:
             existing = {

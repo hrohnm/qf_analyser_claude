@@ -15,6 +15,17 @@ FINISHED_STATUSES = {"FT", "AET", "PEN"}
 MODEL_VERSION = "injury_impact_v1"
 WINDOW = 10
 
+# Position weights for impact scoring.
+# NOTE: fixture_injuries does not include position data; real positional data
+# would come from the /fixtures/players endpoint. Until that data is available
+# we apply a uniform fallback weight of 0.75 for all outfield players.
+# Goalkeepers could be identified heuristically by player_name patterns if needed.
+POSITION_WEIGHTS: dict[str, float] = {
+    "goalkeeper": 1.0,
+    "GK": 1.0,
+}
+DEFAULT_POSITION_WEIGHT = 0.75  # fallback for all players without known position
+
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
@@ -142,6 +153,20 @@ def _replaceability_score(event_rows: list[FixtureEvent], player_id: int | None,
     return _clamp(avg * depth_factor * 2.0, 0.0, 1.0)
 
 
+def _position_weight(player_name: str | None) -> float:
+    """Return a position-based weight for the player.
+
+    Since fixture_injuries does not carry positional data, this is a heuristic.
+    Goalkeepers tend to appear in rosters with 'GK' or 'Keeper' in their role
+    annotation when available. Without position data we use the default weight.
+    """
+    if player_name:
+        name_lower = player_name.lower()
+        if any(kw in name_lower for kw in ("keeper", "goalkeeper")):
+            return POSITION_WEIGHTS.get("goalkeeper", 1.0)
+    return DEFAULT_POSITION_WEIGHT
+
+
 def _availability_factor(injury_type: str | None) -> float:
     if injury_type == "Questionable":
         return 0.55
@@ -210,10 +235,11 @@ async def recompute_fixture_injury_impacts(db: AsyncSession, fixture_id: int) ->
 
         replaceability = _replaceability_score(event_rows, injury.player_id, team_goals)
         availability = _availability_factor(injury.injury_type)
+        pos_weight = _position_weight(injury.player_name)
         confidence = _confidence(injury.player_id, fixtures_count, player_stats.appearances)
 
         raw = (0.4 * importance) + (0.4 * contribution) + (0.2 * (1 - replaceability))
-        impact_score = round(100.0 * raw * availability, 2)
+        impact_score = round(100.0 * raw * availability * pos_weight, 2)
 
         db.add(
             FixtureInjuryImpact(

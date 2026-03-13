@@ -160,11 +160,13 @@ async def recompute_team_form_for_league(
     league_id: int,
     season_year: int,
     window_size: int = 5,
+    extra_league_ids: list[int] | None = None,
 ) -> dict:
+    all_league_ids = [league_id] + (extra_league_ids or [])
     fixtures_result = await db.execute(
         select(Fixture)
         .where(
-            Fixture.league_id == league_id,
+            Fixture.league_id.in_(all_league_ids),
             Fixture.season_year == season_year,
             Fixture.status_short.in_(FINISHED_STATUSES),
         )
@@ -206,7 +208,10 @@ async def recompute_team_form_for_league(
     )
     elo_rows = elo_result.scalars().all()
     if not elo_rows:
-        await recompute_team_elo_for_league(db, league_id=league_id, season_year=season_year)
+        await recompute_team_elo_for_league(
+            db, league_id=league_id, season_year=season_year,
+            extra_league_ids=extra_league_ids,
+        )
         elo_result = await db.execute(
             select(TeamEloSnapshot).where(
                 TeamEloSnapshot.league_id == league_id,

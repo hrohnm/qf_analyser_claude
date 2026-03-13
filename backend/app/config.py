@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     )
 
     api_football_key: str = ""
+    anthropic_api_key: str = ""
+    openai_api_key: str = ""
     database_url: str = "postgresql+asyncpg://qf_user:qf_secret@localhost:5432/qf_analyser"
     database_url_sync: str = "postgresql+psycopg2://qf_user:qf_secret@localhost:5432/qf_analyser"
     environment: str = "development"

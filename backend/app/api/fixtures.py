@@ -10,17 +10,21 @@ from app.db.session import get_db
 from app.models.fixture import Fixture
 from app.models.fixture_events import FixtureEvent
 from app.models.fixture_goal_probability import FixtureGoalProbability
+from app.models.fixture_h2h import FixtureH2H
 from app.models.fixture_injury import FixtureInjury
 from app.models.fixture_injury_impact import FixtureInjuryImpact
 from app.models.fixture_prediction import FixturePrediction
-from app.models.fixture_odds import FixtureOdds
 from app.models.fixture_statistics import FixtureStatistics
 from app.models.league import League
 from app.models.team import Team
 from app.models.team_elo_snapshot import TeamEloSnapshot
 from app.models.team_form_snapshot import TeamFormSnapshot
+from app.models.team_goal_timing import TeamGoalTiming
+from app.models.team_home_advantage import TeamHomeAdvantage
 from app.services.goal_probability_service import recompute_goal_probability_for_fixture
+from app.services.h2h_service import compute_h2h_for_fixture
 from app.services.injury_impact_service import recompute_fixture_injury_impacts
+from app.services.ai_picks_service import generate_ai_picks
 from app.sync.leagues_config import LEAGUES
 
 router = APIRouter(prefix="/fixtures", tags=["Fixtures"])
@@ -104,7 +108,16 @@ class FixtureDetailsOut(BaseModel):
     team_injury_impact_away: float = 0.0
     statistics: list[FixtureStatisticOut]
     events: list[FixtureEventOut]
-    odds: list[dict] = []
+    # New pattern data
+    h2h: dict | None = None
+    goal_timing_home: dict | None = None
+    goal_timing_away: dict | None = None
+    home_advantage_home: dict | None = None
+    home_advantage_away: dict | None = None
+    scoreline_distribution: dict | None = None
+    match_result_probability: dict | None = None
+    value_bets: list[dict] | None = None
+    pattern_evaluation: dict | None = None
 
 
 def _to_out(f: Fixture, league: League | None = None) -> FixtureOut:
@@ -221,16 +234,68 @@ async def fixture_details(
     prediction = prediction_row.scalar_one_or_none()
     prediction_out = None
     if prediction:
+        def _pf(v) -> float | None:
+            return float(v) if v is not None else None
+
         prediction_out = {
+            # Core
             "winner_team_id": prediction.winner_team_id,
             "winner_name": prediction.winner_name,
             "winner_comment": prediction.winner_comment,
             "win_or_draw": prediction.win_or_draw,
             "under_over": prediction.under_over,
             "advice": prediction.advice,
-            "percent_home": float(prediction.percent_home) if prediction.percent_home is not None else None,
-            "percent_draw": float(prediction.percent_draw) if prediction.percent_draw is not None else None,
-            "percent_away": float(prediction.percent_away) if prediction.percent_away is not None else None,
+            "percent_home": _pf(prediction.percent_home),
+            "percent_draw": _pf(prediction.percent_draw),
+            "percent_away": _pf(prediction.percent_away),
+            "goals_pred_home": prediction.goals_pred_home,
+            "goals_pred_away": prediction.goals_pred_away,
+            # Comparison (API-Football's analytical scores)
+            "comparison": {
+                "form":    {"home": _pf(prediction.cmp_form_home),    "away": _pf(prediction.cmp_form_away)},
+                "att":     {"home": _pf(prediction.cmp_att_home),     "away": _pf(prediction.cmp_att_away)},
+                "def":     {"home": _pf(prediction.cmp_def_home),     "away": _pf(prediction.cmp_def_away)},
+                "poisson": {"home": _pf(prediction.cmp_poisson_home), "away": _pf(prediction.cmp_poisson_away)},
+                "h2h":     {"home": _pf(prediction.cmp_h2h_home),     "away": _pf(prediction.cmp_h2h_away)},
+                "goals":   {"home": _pf(prediction.cmp_goals_home),   "away": _pf(prediction.cmp_goals_away)},
+                "total":   {"home": _pf(prediction.cmp_total_home),   "away": _pf(prediction.cmp_total_away)},
+            },
+            # Last 5
+            "home_last5": {
+                "form": _pf(prediction.home_last5_form),
+                "att":  _pf(prediction.home_last5_att),
+                "def":  _pf(prediction.home_last5_def),
+                "goals_for_avg":     _pf(prediction.home_last5_goals_for_avg),
+                "goals_against_avg": _pf(prediction.home_last5_goals_against_avg),
+            },
+            "away_last5": {
+                "form": _pf(prediction.away_last5_form),
+                "att":  _pf(prediction.away_last5_att),
+                "def":  _pf(prediction.away_last5_def),
+                "goals_for_avg":     _pf(prediction.away_last5_goals_for_avg),
+                "goals_against_avg": _pf(prediction.away_last5_goals_against_avg),
+            },
+            # Season stats
+            "home_season": {
+                "form": prediction.home_season_form,
+                "clean_sheet": {"home": prediction.home_clean_sheet_home, "away": prediction.home_clean_sheet_away, "total": prediction.home_clean_sheet_total},
+                "failed_to_score_total": prediction.home_failed_to_score_total,
+                "wins":  {"home": prediction.home_wins_home, "away": prediction.home_wins_away},
+                "draws_total": prediction.home_draws_total,
+                "loses_total": prediction.home_loses_total,
+                "goals_for_avg":     _pf(prediction.home_goals_for_avg_total),
+                "goals_against_avg": _pf(prediction.home_goals_against_avg_total),
+            },
+            "away_season": {
+                "form": prediction.away_season_form,
+                "clean_sheet": {"home": prediction.away_clean_sheet_home, "away": prediction.away_clean_sheet_away, "total": prediction.away_clean_sheet_total},
+                "failed_to_score_total": prediction.away_failed_to_score_total,
+                "wins":  {"home": prediction.away_wins_home, "away": prediction.away_wins_away},
+                "draws_total": prediction.away_draws_total,
+                "loses_total": prediction.away_loses_total,
+                "goals_for_avg":     _pf(prediction.away_goals_for_avg_total),
+                "goals_against_avg": _pf(prediction.away_goals_against_avg_total),
+            },
             "fetched_at": prediction.fetched_at.isoformat() if prediction.fetched_at else None,
         }
 
@@ -403,22 +468,187 @@ async def fixture_details(
         2,
     )
 
-    odds_result = await db.execute(
-        select(FixtureOdds)
-        .where(FixtureOdds.fixture_id == fixture_id)
-        .order_by(FixtureOdds.bookmaker_id, FixtureOdds.bet_id)
-    )
-    odds = [
-        {
-            "bookmaker_id": o.bookmaker_id,
-            "bookmaker_name": o.bookmaker_name,
-            "bet_id": o.bet_id,
-            "bet_name": o.bet_name,
-            "values": o.values,
-            "updated_at": o.updated_at.isoformat() if o.updated_at else None,
+    # H2H
+    h2h_row = (await db.execute(
+        select(FixtureH2H).where(FixtureH2H.fixture_id == fixture_id)
+    )).scalar_one_or_none()
+    if h2h_row is None and fixture.status_short in {"NS", "TBD", "PST", "1H", "HT", "2H"}:
+        try:
+            await compute_h2h_for_fixture(db, fixture_id)
+            h2h_row = (await db.execute(
+                select(FixtureH2H).where(FixtureH2H.fixture_id == fixture_id)
+            )).scalar_one_or_none()
+        except Exception:
+            pass
+    h2h_out = None
+    if h2h_row:
+        h2h_out = {
+            "matches_total": h2h_row.h2h_matches_total,
+            "home_wins": h2h_row.h2h_home_wins,
+            "draws": h2h_row.h2h_draws,
+            "away_wins": h2h_row.h2h_away_wins,
+            "home_win_pct": float(h2h_row.h2h_home_win_pct),
+            "draw_pct": float(h2h_row.h2h_draw_pct),
+            "away_win_pct": float(h2h_row.h2h_away_win_pct),
+            "avg_goals_home": float(h2h_row.h2h_avg_goals_home),
+            "avg_goals_away": float(h2h_row.h2h_avg_goals_away),
+            "avg_total_goals": float(h2h_row.h2h_avg_total_goals),
+            "btts_rate": float(h2h_row.h2h_btts_rate),
+            "over_25_rate": float(h2h_row.h2h_over_25_rate),
+            "h2h_score": float(h2h_row.h2h_score),
         }
-        for o in odds_result.scalars().all()
-    ]
+
+    # Goal Timing
+    timing_rows = (await db.execute(
+        select(TeamGoalTiming).where(
+            TeamGoalTiming.league_id == fixture.league_id,
+            TeamGoalTiming.season_year == fixture.season_year,
+            TeamGoalTiming.team_id.in_([fixture.home_team_id, fixture.away_team_id]),
+            TeamGoalTiming.scope == "overall",
+        )
+    )).scalars().all()
+    timing_map = {t.team_id: t for t in timing_rows}
+
+    def _timing_to_dict(t: TeamGoalTiming | None) -> dict | None:
+        if t is None:
+            return None
+        return {
+            "games_played": t.games_played,
+            "goals_scored": t.goals_scored,
+            "timing_attack": t.timing_attack,
+            "timing_defense": t.timing_defense,
+            "ht_attack_ratio": float(t.ht_attack_ratio) if t.ht_attack_ratio else None,
+            "profil_typ": t.profil_typ,
+            "p_goal_first_30": float(t.p_goal_first_30) if t.p_goal_first_30 else None,
+            "p_goal_last_15": float(t.p_goal_last_15) if t.p_goal_last_15 else None,
+        }
+
+    # Home Advantage
+    hadv_rows = (await db.execute(
+        select(TeamHomeAdvantage).where(
+            TeamHomeAdvantage.league_id == fixture.league_id,
+            TeamHomeAdvantage.season_year == fixture.season_year,
+            TeamHomeAdvantage.team_id.in_([fixture.home_team_id, fixture.away_team_id]),
+        )
+    )).scalars().all()
+    hadv_map = {h.team_id: h for h in hadv_rows}
+
+    def _hadv_to_dict(h: TeamHomeAdvantage | None) -> dict | None:
+        if h is None:
+            return None
+        return {
+            "home_ppg": float(h.home_ppg),
+            "away_ppg": float(h.away_ppg),
+            "advantage_factor": float(h.advantage_factor),
+            "normalized_factor": float(h.normalized_factor),
+            "tier": h.tier,
+            "games_home": h.games_home,
+            "games_away": h.games_away,
+        }
+
+    # Scoreline + MRP + Value Bets + Pattern Evaluation (graceful fallback)
+    scoreline_out = None
+    mrp_out = None
+    value_bets_out = None
+    evaluation_out = None
+    try:
+        from app.models.fixture_scoreline_distribution import FixtureScorelineDistribution
+        from app.models.fixture_match_result_probability import FixtureMatchResultProbability
+        from app.models.fixture_value_bet import FixtureValueBet
+        from app.models.fixture_pattern_evaluation import FixturePatternEvaluation
+
+        sd_row = (await db.execute(
+            select(FixtureScorelineDistribution).where(FixtureScorelineDistribution.fixture_id == fixture_id)
+        )).scalar_one_or_none()
+        if sd_row:
+            scoreline_out = {
+                "lambda_home": float(sd_row.lambda_home),
+                "lambda_away": float(sd_row.lambda_away),
+                "p_matrix": sd_row.p_matrix,
+                "p_home_win": float(sd_row.p_home_win),
+                "p_draw": float(sd_row.p_draw),
+                "p_away_win": float(sd_row.p_away_win),
+                "p_btts": float(sd_row.p_btts),
+                "p_over_15": float(sd_row.p_over_15),
+                "p_over_25": float(sd_row.p_over_25),
+                "p_over_35": float(sd_row.p_over_35),
+                "p_home_clean_sheet": float(sd_row.p_home_clean_sheet),
+                "p_away_clean_sheet": float(sd_row.p_away_clean_sheet),
+                "most_likely_score": sd_row.most_likely_score,
+                "most_likely_score_prob": float(sd_row.most_likely_score_prob),
+            }
+
+        mrp_row = (await db.execute(
+            select(FixtureMatchResultProbability).where(FixtureMatchResultProbability.fixture_id == fixture_id)
+        )).scalar_one_or_none()
+        if mrp_row:
+            mrp_out = {
+                "p_home_win": float(mrp_row.p_home_win),
+                "p_draw": float(mrp_row.p_draw),
+                "p_away_win": float(mrp_row.p_away_win),
+                "p_btts": float(mrp_row.p_btts),
+                "p_over_25": float(mrp_row.p_over_25),
+                "p_over_15": float(mrp_row.p_over_15),
+                "p_over_35": float(mrp_row.p_over_35),
+                "confidence": float(mrp_row.confidence),
+                "elo_home_prob": float(mrp_row.elo_home_prob) if mrp_row.elo_home_prob else None,
+                "elo_away_prob": float(mrp_row.elo_away_prob) if mrp_row.elo_away_prob else None,
+            }
+
+        vb_rows = (await db.execute(
+            select(FixtureValueBet)
+            .where(FixtureValueBet.fixture_id == fixture_id)
+            .order_by(FixtureValueBet.edge.desc())
+        )).scalars().all()
+        if vb_rows:
+            value_bets_out = [
+                {
+                    "market_name": v.market_name,
+                    "bet_value": v.bet_value,
+                    "model_prob": float(v.model_prob),
+                    "bookmaker_odd": float(v.bookmaker_odd),
+                    "implied_prob": float(v.implied_prob),
+                    "edge": float(v.edge),
+                    "expected_value": float(v.expected_value),
+                    "kelly_fraction": float(v.kelly_fraction),
+                    "fair_odd": float(v.fair_odd),
+                    "tier": v.tier,
+                }
+                for v in vb_rows
+            ]
+        eval_row = (await db.execute(
+            select(FixturePatternEvaluation).where(FixturePatternEvaluation.fixture_id == fixture_id)
+        )).scalar_one_or_none()
+        if eval_row:
+            evaluation_out = {
+                "actual_outcome": eval_row.actual_outcome,
+                "predicted_outcome": eval_row.predicted_outcome,
+                "outcome_correct": eval_row.outcome_correct,
+                "p_home_win": float(eval_row.p_home_win),
+                "p_draw": float(eval_row.p_draw),
+                "p_away_win": float(eval_row.p_away_win),
+                "p_actual_outcome": float(eval_row.p_actual_outcome),
+                "log_loss": float(eval_row.log_loss),
+                "brier_score": float(eval_row.brier_score),
+                "predicted_total_goals": float(eval_row.predicted_total_goals),
+                "actual_total_goals": eval_row.actual_total_goals,
+                "goals_diff": float(eval_row.goals_diff),
+                "p_over_25": float(eval_row.p_over_25),
+                "predicted_over_25": eval_row.predicted_over_25,
+                "actual_over_25": eval_row.actual_over_25,
+                "over_25_correct": eval_row.over_25_correct,
+                "p_btts": float(eval_row.p_btts),
+                "predicted_btts": eval_row.predicted_btts,
+                "actual_btts": eval_row.actual_btts,
+                "btts_correct": eval_row.btts_correct,
+                "predicted_score": eval_row.predicted_score,
+                "predicted_score_prob": float(eval_row.predicted_score_prob) if eval_row.predicted_score_prob else None,
+                "actual_score": eval_row.actual_score,
+                "score_correct": eval_row.score_correct,
+                "computed_at": eval_row.computed_at.isoformat() if eval_row.computed_at else None,
+            }
+    except Exception:
+        pass
 
     return FixtureDetailsOut(
         fixture=_to_out(fixture, league),
@@ -434,8 +664,274 @@ async def fixture_details(
         team_injury_impact_away=away_impact,
         statistics=statistics,
         events=events,
-        odds=odds,
+        h2h=h2h_out,
+        goal_timing_home=_timing_to_dict(timing_map.get(fixture.home_team_id)),
+        goal_timing_away=_timing_to_dict(timing_map.get(fixture.away_team_id)),
+        home_advantage_home=_hadv_to_dict(hadv_map.get(fixture.home_team_id)),
+        home_advantage_away=_hadv_to_dict(hadv_map.get(fixture.away_team_id)),
+        scoreline_distribution=scoreline_out,
+        match_result_probability=mrp_out,
+        value_bets=value_bets_out,
+        pattern_evaluation=evaluation_out,
     )
+
+
+@router.post("/{fixture_id}/gpt-analysis")
+async def get_gpt_analysis(
+    fixture_id: int,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Gibt gecachte GPT-4o Spielanalyse zurück oder generiert eine neue."""
+    from app.services.gpt_analysis_service import generate_gpt_analysis
+    try:
+        return await generate_gpt_analysis(db, fixture_id, force=force)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"GPT-Analyse Fehler: {e}")
+
+
+@router.post("/{fixture_id}/ai-picks")
+async def get_ai_picks(
+    fixture_id: int,
+    force: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generiert oder lädt 5 Wett-Picks + Torschütze via Claude AI. force=true → Neuberechnung."""
+    try:
+        result = await generate_ai_picks(db, fixture_id, force=force)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI-Picks Fehler: {e}")
+
+
+from app.models.fixture_ai_pick import FixtureAiPick as _FixtureAiPick
+
+
+@router.patch("/{fixture_id}/ai-picks/results")
+async def update_pick_results(
+    fixture_id: int,
+    results: list[dict],   # [{pick_index: 0, result: "win"}, ...]
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Setzt das Ergebnis (win/loss/push) für einzelne Picks nach Spielende.
+    Body: [{"pick_index": 0, "result": "win"}, ...]
+    """
+    row = (await db.execute(
+        select(_FixtureAiPick).where(_FixtureAiPick.fixture_id == fixture_id)
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Keine AI-Picks für dieses Fixture")
+
+    picks = list(row.picks)
+    for r in results:
+        idx = r.get("pick_index")
+        result_val = r.get("result")
+        if idx is None or result_val not in ("win", "loss", "push", None):
+            raise HTTPException(status_code=400, detail=f"Ungültiger Eintrag: {r}")
+        if 0 <= idx < len(picks):
+            picks[idx] = {**picks[idx], "result": result_val}
+
+    from sqlalchemy import update as sa_update
+    await db.execute(
+        sa_update(_FixtureAiPick)
+        .where(_FixtureAiPick.fixture_id == fixture_id)
+        .values(picks=picks, updated_at=datetime.utcnow())
+    )
+    await db.commit()
+    return {"fixture_id": fixture_id, "picks": picks}
+
+
+@router.get("/evaluations")
+async def list_evaluations(
+    from_date: date | None = Query(None),
+    to_date: date | None = Query(None),
+    season_year: int = Query(2025),
+    league_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Liste aller Pattern-Evaluierungen mit Fixture-Basisdaten.
+    Standard: letzte 7 Tage. Sortierung: neueste zuerst.
+    """
+    from app.models.fixture_pattern_evaluation import FixturePatternEvaluation as _FPE
+    from datetime import timedelta
+
+    today = date.today()
+    date_from = from_date or (today - timedelta(days=7))
+    date_to   = to_date   or today
+
+    # Join fixtures + league + evaluation
+    stmt = (
+        select(Fixture, League, _FPE)
+        .join(League, League.id == Fixture.league_id)
+        .join(_FPE, _FPE.fixture_id == Fixture.id)
+        .options(selectinload(Fixture.home_team), selectinload(Fixture.away_team))
+        .where(
+            Fixture.season_year == season_year,
+            cast(Fixture.kickoff_utc, Date) >= date_from,
+            cast(Fixture.kickoff_utc, Date) <= date_to,
+        )
+    )
+    if league_id:
+        stmt = stmt.where(Fixture.league_id == league_id)
+    stmt = stmt.order_by(Fixture.kickoff_utc.desc())
+
+    rows = (await db.execute(stmt)).all()
+
+    result = []
+    for fixture, league, ev in rows:
+        result.append({
+            **_to_out(fixture, league).__dict__,
+            "actual_outcome": ev.actual_outcome,
+            "predicted_outcome": ev.predicted_outcome,
+            "outcome_correct": ev.outcome_correct,
+            "p_home_win": float(ev.p_home_win),
+            "p_draw": float(ev.p_draw),
+            "p_away_win": float(ev.p_away_win),
+            "p_actual_outcome": float(ev.p_actual_outcome),
+            "log_loss": float(ev.log_loss),
+            "brier_score": float(ev.brier_score),
+            "predicted_total_goals": float(ev.predicted_total_goals),
+            "actual_total_goals": ev.actual_total_goals,
+            "goals_diff": float(ev.goals_diff),
+            "dc_prediction": ev.dc_prediction,
+            "dc_prob": float(ev.dc_prob) if ev.dc_prob is not None else None,
+            "dc_correct": ev.dc_correct,
+            "p_over_25": float(ev.p_over_25),
+            "predicted_over_25": ev.predicted_over_25,
+            "actual_over_25": ev.actual_over_25,
+            "over_25_correct": ev.over_25_correct,
+            "p_over_15": float(ev.p_over_15) if ev.p_over_15 is not None else None,
+            "over_15_correct": ev.over_15_correct,
+            "p_btts": float(ev.p_btts),
+            "predicted_btts": ev.predicted_btts,
+            "actual_btts": ev.actual_btts,
+            "btts_correct": ev.btts_correct,
+            "p_home_scores": float(ev.p_home_scores) if ev.p_home_scores is not None else None,
+            "home_scores_correct": ev.home_scores_correct,
+            "p_away_scores": float(ev.p_away_scores) if ev.p_away_scores is not None else None,
+            "away_scores_correct": ev.away_scores_correct,
+            "predicted_score": ev.predicted_score,
+            "predicted_score_prob": float(ev.predicted_score_prob) if ev.predicted_score_prob else None,
+            "actual_score": ev.actual_score,
+            "score_correct": ev.score_correct,
+            "computed_at": ev.computed_at.isoformat() if ev.computed_at else None,
+        })
+    return result
+
+
+@router.get("/today/enriched")
+async def fixtures_today_enriched(
+    for_date: date | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Heutige Fixtures mit KI-Pick-Status, MRP und Torwahrscheinlichkeiten."""
+    from sqlalchemy import text
+    target = for_date or date.today()
+
+    # Load fixtures
+    stmt = (
+        select(Fixture, League)
+        .join(League, League.id == Fixture.league_id)
+        .options(selectinload(Fixture.home_team), selectinload(Fixture.away_team))
+        .where(cast(Fixture.kickoff_utc, Date) == target)
+        .order_by(Fixture.kickoff_utc)
+    )
+    rows = (await db.execute(stmt)).all()
+    if not rows:
+        return []
+
+    fixture_ids = [f.id for f, _ in rows]
+
+    # AI picks existence check
+    from app.models.fixture_ai_pick import FixtureAiPick as _FxPick
+    picks_rows = (await db.execute(
+        select(_FxPick.fixture_id).where(_FxPick.fixture_id.in_(fixture_ids))
+    )).scalars().all()
+    has_picks = set(picks_rows)
+
+    # MRP
+    try:
+        from app.models.fixture_match_result_probability import FixtureMatchResultProbability as _MRP
+        mrp_rows = (await db.execute(
+            select(_MRP).where(_MRP.fixture_id.in_(fixture_ids))
+        )).scalars().all()
+        mrp_by_id = {r.fixture_id: r for r in mrp_rows}
+    except Exception:
+        mrp_by_id = {}
+
+    # Goal probability (p_ge_1_goal per team)
+    gp_rows = (await db.execute(
+        select(FixtureGoalProbability).where(
+            FixtureGoalProbability.fixture_id.in_(fixture_ids)
+        )
+    )).scalars().all()
+    gp_by_fixture: dict[int, dict] = {}
+    for gp in gp_rows:
+        gp_by_fixture.setdefault(gp.fixture_id, {})[gp.team_id] = gp
+
+    # Pattern evaluation (only for finished fixtures)
+    finished_ids = [
+        f.id for f, _ in rows
+        if f.status_short in {"FT", "AET", "PEN"}
+    ]
+    eval_by_id: dict[int, object] = {}
+    if finished_ids:
+        try:
+            from app.models.fixture_pattern_evaluation import FixturePatternEvaluation as _FPE
+            eval_rows = (await db.execute(
+                select(_FPE).where(_FPE.fixture_id.in_(finished_ids))
+            )).scalars().all()
+            eval_by_id = {r.fixture_id: r for r in eval_rows}
+        except Exception:
+            pass
+
+    result = []
+    for fixture, league in rows:
+        base = _to_out(fixture, league).__dict__
+        mrp = mrp_by_id.get(fixture.id)
+        gps = gp_by_fixture.get(fixture.id, {})
+        gp_home = gps.get(fixture.home_team_id)
+        gp_away = gps.get(fixture.away_team_id)
+        ev = eval_by_id.get(fixture.id)
+        evaluation = None
+        if ev is not None:
+            evaluation = {
+                "outcome_correct": ev.outcome_correct,
+                "predicted_outcome": ev.predicted_outcome,
+                "actual_outcome": ev.actual_outcome,
+                "p_actual_outcome": float(ev.p_actual_outcome),
+                "dc_prediction": ev.dc_prediction,
+                "dc_correct": ev.dc_correct,
+                "over_25_correct": ev.over_25_correct,
+                "over_15_correct": ev.over_15_correct,
+                "btts_correct": ev.btts_correct,
+                "home_scores_correct": ev.home_scores_correct,
+                "away_scores_correct": ev.away_scores_correct,
+                "score_correct": ev.score_correct,
+                "predicted_score": ev.predicted_score,
+                "actual_score": ev.actual_score,
+                "brier_score": float(ev.brier_score),
+                "goals_diff": float(ev.goals_diff),
+            }
+        result.append({
+            **base,
+            "has_ai_picks": fixture.id in has_picks,
+            "p_home_win":   float(mrp.p_home_win)  if mrp else None,
+            "p_draw":       float(mrp.p_draw)       if mrp else None,
+            "p_away_win":   float(mrp.p_away_win)   if mrp else None,
+            "p_btts":       float(mrp.p_btts)       if mrp else None,
+            "p_over_15":    float(mrp.p_over_15)    if mrp and mrp.p_over_15 is not None else None,
+            "p_goal_home":  float(gp_home.p_ge_1_goal) if gp_home else None,
+            "p_goal_away":  float(gp_away.p_ge_1_goal) if gp_away else None,
+            "evaluation":   evaluation,
+        })
+    return result
 
 
 @router.get("/today", response_model=list[FixtureOut])
