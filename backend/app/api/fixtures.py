@@ -15,6 +15,7 @@ from app.models.fixture_injury import FixtureInjury
 from app.models.fixture_injury_impact import FixtureInjuryImpact
 from app.models.fixture_prediction import FixturePrediction
 from app.models.fixture_statistics import FixtureStatistics
+from app.models.fixture_top_scorer_pattern import FixtureTopScorerPattern
 from app.models.league import League
 from app.models.team import Team
 from app.models.team_elo_snapshot import TeamEloSnapshot
@@ -22,9 +23,10 @@ from app.models.team_form_snapshot import TeamFormSnapshot
 from app.models.team_goal_timing import TeamGoalTiming
 from app.models.team_home_advantage import TeamHomeAdvantage
 from app.services.goal_probability_service import recompute_goal_probability_for_fixture
-from app.services.h2h_service import compute_h2h_for_fixture
+from app.services.h2h_service import MIN_MATCHES as H2H_MIN_MATCHES, compute_h2h_for_fixture
 from app.services.injury_impact_service import recompute_fixture_injury_impacts
 from app.services.ai_picks_service import generate_ai_picks
+from app.services.top_scorer_service import compute_top_scorer_for_fixture
 from app.sync.leagues_config import LEAGUES
 
 router = APIRouter(prefix="/fixtures", tags=["Fixtures"])
@@ -47,6 +49,7 @@ class FixtureOut(BaseModel):
     round: str | None = None
     matchday: int | None = None
     status_short: str | None = None
+    elapsed: int | None = None
     home_score: int | None = None
     away_score: int | None = None
     home_ht_score: int | None = None
@@ -116,8 +119,10 @@ class FixtureDetailsOut(BaseModel):
     home_advantage_away: dict | None = None
     scoreline_distribution: dict | None = None
     match_result_probability: dict | None = None
+    pattern_predictions: dict | None = None
     value_bets: list[dict] | None = None
     pattern_evaluation: dict | None = None
+    top_scorer_pattern: dict | None = None
 
 
 def _to_out(f: Fixture, league: League | None = None) -> FixtureOut:
@@ -137,6 +142,7 @@ def _to_out(f: Fixture, league: League | None = None) -> FixtureOut:
         round=f.round,
         matchday=f.matchday,
         status_short=f.status_short,
+        elapsed=f.elapsed,
         home_score=f.home_score,
         away_score=f.away_score,
         home_ht_score=f.home_ht_score,
@@ -147,6 +153,107 @@ def _to_out(f: Fixture, league: League | None = None) -> FixtureOut:
 
 def _clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def _binary_signal(prob_yes: float | None, market: str, yes_label: str, no_label: str, threshold: float, min_confidence: float) -> dict | None:
+    if prob_yes is None:
+        return None
+    if prob_yes >= threshold:
+        pick = yes_label
+        probability = prob_yes
+    else:
+        pick = no_label
+        probability = 1.0 - prob_yes
+    confidence = _clamp(probability, 0.0, 1.0)
+    emitted = confidence >= min_confidence
+    return {
+        "market": market,
+        "pick": pick,
+        "probability": round(probability, 4),
+        "raw_probability": round(prob_yes, 4),
+        "confidence": round(confidence, 4),
+        "threshold": round(threshold, 4),
+        "emitted": emitted,
+    }
+
+
+def _outcome_signal(p_home: float | None, p_draw: float | None, p_away: float | None, home_label: str, away_label: str) -> dict | None:
+    if p_home is None or p_draw is None or p_away is None:
+        return None
+    options = [
+        {"pick": home_label, "prob": p_home},
+        {"pick": "Unentschieden", "prob": p_draw},
+        {"pick": away_label, "prob": p_away},
+    ]
+    options.sort(key=lambda x: x["prob"], reverse=True)
+    best = options[0]
+    second = options[1]
+    margin = best["prob"] - second["prob"]
+    confidence = _clamp((0.65 * best["prob"]) + (0.35 * min(1.0, margin / 0.20)), 0.0, 1.0)
+    emitted = confidence >= 0.58 and margin >= 0.06
+    return {
+        "market": "1X2",
+        "pick": best["pick"],
+        "probability": round(best["prob"], 4),
+        "confidence": round(confidence, 4),
+        "margin": round(margin, 4),
+        "emitted": emitted,
+    }
+
+
+def _double_chance_signal(p_home: float | None, p_draw: float | None, p_away: float | None) -> dict | None:
+    if p_home is None or p_draw is None or p_away is None:
+        return None
+    options = [
+        {"pick": "1X", "prob": p_home + p_draw},
+        {"pick": "X2", "prob": p_draw + p_away},
+        {"pick": "12", "prob": p_home + p_away},
+    ]
+    options.sort(key=lambda x: x["prob"], reverse=True)
+    best = options[0]
+    second = options[1]
+    confidence = _clamp(best["prob"], 0.0, 1.0)
+    emitted = confidence >= 0.68 and (best["prob"] - second["prob"]) >= 0.04
+    return {
+        "market": "DC",
+        "pick": best["pick"],
+        "probability": round(best["prob"], 4),
+        "confidence": round(confidence, 4),
+        "margin": round(best["prob"] - second["prob"], 4),
+        "emitted": emitted,
+    }
+
+
+def _build_pattern_predictions(
+    fixture: Fixture,
+    mrp_out: dict | None,
+    scoreline_out: dict | None,
+    gp_home: dict | None,
+    gp_away: dict | None,
+) -> dict | None:
+    p_home = mrp_out["p_home_win"] if mrp_out else (scoreline_out["p_home_win"] if scoreline_out else None)
+    p_draw = mrp_out["p_draw"] if mrp_out else (scoreline_out["p_draw"] if scoreline_out else None)
+    p_away = mrp_out["p_away_win"] if mrp_out else (scoreline_out["p_away_win"] if scoreline_out else None)
+    p_btts = mrp_out["p_btts"] if mrp_out else (scoreline_out["p_btts"] if scoreline_out else None)
+    p_over_15 = mrp_out["p_over_15"] if mrp_out else (scoreline_out["p_over_15"] if scoreline_out else None)
+    p_over_25 = mrp_out["p_over_25"] if mrp_out else (scoreline_out["p_over_25"] if scoreline_out else None)
+    p_home_scores = gp_home["p_ge_1_goal"] if gp_home else None
+    p_away_scores = gp_away["p_ge_1_goal"] if gp_away else None
+
+    predictions = {
+        "one_x_two": _outcome_signal(
+            p_home, p_draw, p_away,
+            fixture.home_team.name if fixture.home_team else "Heim",
+            fixture.away_team.name if fixture.away_team else "Gast",
+        ),
+        "double_chance": _double_chance_signal(p_home, p_draw, p_away),
+        "over_15": _binary_signal(p_over_15, "Over 1.5", "Ja", "Nein", 0.55, 0.67),
+        "over_25": _binary_signal(p_over_25, "Over 2.5", "Ja", "Nein", 0.50, 0.62),
+        "btts": _binary_signal(p_btts, "BTTS", "Ja", "Nein", 0.50, 0.62),
+        "home_scores": _binary_signal(p_home_scores, "Home scores", "Ja", "Nein", 0.50, 0.64),
+        "away_scores": _binary_signal(p_away_scores, "Away scores", "Ja", "Nein", 0.50, 0.64),
+    }
+    return predictions if any(v is not None for v in predictions.values()) else None
 
 
 def _poisson_ge(lmbd: float, at_least: int) -> float:
@@ -496,6 +603,8 @@ async def fixture_details(
             "btts_rate": float(h2h_row.h2h_btts_rate),
             "over_25_rate": float(h2h_row.h2h_over_25_rate),
             "h2h_score": float(h2h_row.h2h_score),
+            "is_low_sample": 0 < h2h_row.h2h_matches_total < H2H_MIN_MATCHES,
+            "sample_note": f"Nur {h2h_row.h2h_matches_total} Direktduell(e) in der Datenbasis." if 0 < h2h_row.h2h_matches_total < H2H_MIN_MATCHES else None,
         }
 
     # Goal Timing
@@ -551,6 +660,8 @@ async def fixture_details(
     mrp_out = None
     value_bets_out = None
     evaluation_out = None
+    pattern_predictions_out = None
+    top_scorer_pattern_out = None
     try:
         from app.models.fixture_scoreline_distribution import FixtureScorelineDistribution
         from app.models.fixture_match_result_probability import FixtureMatchResultProbability
@@ -647,8 +758,40 @@ async def fixture_details(
                 "score_correct": eval_row.score_correct,
                 "computed_at": eval_row.computed_at.isoformat() if eval_row.computed_at else None,
             }
+
+        ts_row = (await db.execute(
+            select(FixtureTopScorerPattern).where(FixtureTopScorerPattern.fixture_id == fixture_id)
+        )).scalar_one_or_none()
+        if ts_row is None:
+            await compute_top_scorer_for_fixture(db, fixture_id)
+            ts_row = (await db.execute(
+                select(FixtureTopScorerPattern).where(FixtureTopScorerPattern.fixture_id == fixture_id)
+            )).scalar_one_or_none()
+        if ts_row:
+            top_scorer_pattern_out = {
+                "top_scorer": ts_row.top_scorer,
+                "home_candidates": ts_row.home_candidates,
+                "away_candidates": ts_row.away_candidates,
+                "home_penalties_per_match": float(ts_row.home_penalties_per_match) if ts_row.home_penalties_per_match is not None else None,
+                "away_penalties_per_match": float(ts_row.away_penalties_per_match) if ts_row.away_penalties_per_match is not None else None,
+                "home_penalty_conversion_share": float(ts_row.home_penalty_conversion_share) if ts_row.home_penalty_conversion_share is not None else None,
+                "away_penalty_conversion_share": float(ts_row.away_penalty_conversion_share) if ts_row.away_penalty_conversion_share is not None else None,
+                "model_confidence": float(ts_row.model_confidence),
+                "sample_size_home": ts_row.sample_size_home,
+                "sample_size_away": ts_row.sample_size_away,
+                "model_version": ts_row.model_version,
+                "computed_at": ts_row.computed_at.isoformat() if ts_row.computed_at else None,
+            }
     except Exception:
         pass
+
+    pattern_predictions_out = _build_pattern_predictions(
+        fixture=fixture,
+        mrp_out=mrp_out,
+        scoreline_out=scoreline_out,
+        gp_home=_gp_to_dict(gp_home),
+        gp_away=_gp_to_dict(gp_away),
+    )
 
     return FixtureDetailsOut(
         fixture=_to_out(fixture, league),
@@ -671,8 +814,10 @@ async def fixture_details(
         home_advantage_away=_hadv_to_dict(hadv_map.get(fixture.away_team_id)),
         scoreline_distribution=scoreline_out,
         match_result_probability=mrp_out,
+        pattern_predictions=pattern_predictions_out,
         value_bets=value_bets_out,
         pattern_evaluation=evaluation_out,
+        top_scorer_pattern=top_scorer_pattern_out,
     )
 
 

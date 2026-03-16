@@ -14,6 +14,7 @@ from app.models.fixture_match_result_probability import FixtureMatchResultProbab
 from app.models.fixture_scoreline_distribution import FixtureScorelineDistribution
 from app.models.team_elo_snapshot import TeamEloSnapshot
 from app.models.team_form_snapshot import TeamFormSnapshot
+from app.models.team_season_profile import TeamSeasonProfile
 
 # Phase-1 models - imported with graceful fallback if unavailable at runtime
 try:
@@ -30,7 +31,9 @@ except ImportError:
     TeamHomeAdvantage = None  # type: ignore[assignment,misc]
     _HAS_HOME_ADV = False
 
-MODEL_VERSION = "mrp_v2"
+MODEL_VERSION = "mrp_v3"
+RECENT_MARKET_WINDOW = 12
+RECENT_MARKET_SEASONS = 5
 
 FALLBACK_1X2 = (0.45, 0.27, 0.28)  # home, draw, away
 WEIGHTS = {
@@ -217,10 +220,10 @@ async def _goal_prob_component(
 
 async def _h2h_component(
     db: AsyncSession, fixture_id: int
-) -> tuple[tuple[float, float, float], float | None, bool]:
-    """Returns ((p_home, p_draw, p_away), h2h_home_pct, has_data)."""
+) -> tuple[tuple[float, float, float], float | None, float | None, float | None, int, bool]:
+    """Returns ((p_home, p_draw, p_away), h2h_home_pct, h2h_btts, h2h_over25, matches, has_data)."""
     if not _HAS_H2H:
-        return FALLBACK_1X2, None, False
+        return FALLBACK_1X2, None, None, None, 0, False
 
     res = await db.execute(
         select(FixtureH2H).where(FixtureH2H.fixture_id == fixture_id)
@@ -228,14 +231,166 @@ async def _h2h_component(
     h2h = res.scalar_one_or_none()
 
     if h2h is None or h2h.h2h_matches_total == 0:
-        return FALLBACK_1X2, None, False
+        return FALLBACK_1X2, None, None, None, 0, False
 
     probs = _normalise_1x2(
         float(h2h.h2h_home_win_pct),
         float(h2h.h2h_draw_pct),
         float(h2h.h2h_away_win_pct),
     )
-    return probs, float(h2h.h2h_home_win_pct), True
+    return (
+        probs,
+        float(h2h.h2h_home_win_pct),
+        float(h2h.h2h_btts_rate),
+        float(h2h.h2h_over_25_rate),
+        int(h2h.h2h_matches_total),
+        True,
+    )
+
+
+async def _recent_market_rates_component(
+    db: AsyncSession,
+    fixture: Fixture,
+) -> tuple[float | None, float | None, bool]:
+    """Estimate BTTS / Over 2.5 from recent fixture-only team rates."""
+
+    async def _team_rates(team_id: int, target_is_home: bool) -> tuple[dict[str, float], bool]:
+        result = await db.execute(
+            select(Fixture).where(
+                Fixture.league_id == fixture.league_id,
+                Fixture.season_year >= fixture.season_year - (RECENT_MARKET_SEASONS - 1),
+                Fixture.season_year <= fixture.season_year,
+                Fixture.status_short.in_(["FT", "AET", "PEN"]),
+                ((Fixture.home_team_id == team_id) | (Fixture.away_team_id == team_id)),
+                Fixture.kickoff_utc < fixture.kickoff_utc if fixture.kickoff_utc is not None else True,
+            ).order_by(Fixture.kickoff_utc.desc(), Fixture.id.desc()).limit(RECENT_MARKET_WINDOW)
+        )
+        matches = result.scalars().all()
+        if not matches:
+            return {}, False
+
+        scores_w = 0.0
+        concedes_w = 0.0
+        btts_w = 0.0
+        over25_w = 0.0
+        total_w = 0.0
+
+        for idx, m in enumerate(matches):
+            if m.home_score is None or m.away_score is None:
+                continue
+            is_home = m.home_team_id == team_id
+            gf = m.home_score if is_home else m.away_score
+            ga = m.away_score if is_home else m.home_score
+            base_w = math.exp(-0.10 * idx)
+            venue_w = 1.15 if is_home == target_is_home else 0.9
+            w = base_w * venue_w
+
+            scores_w += (1.0 if gf > 0 else 0.0) * w
+            concedes_w += (1.0 if ga > 0 else 0.0) * w
+            btts_w += (1.0 if gf > 0 and ga > 0 else 0.0) * w
+            over25_w += (1.0 if (gf + ga) > 2 else 0.0) * w
+            total_w += w
+
+        if total_w <= 0:
+            return {}, False
+
+        return {
+            "scores_rate": scores_w / total_w,
+            "concedes_rate": concedes_w / total_w,
+            "btts_rate": btts_w / total_w,
+            "over25_rate": over25_w / total_w,
+            "matches": float(len(matches)),
+        }, True
+
+    home_rates, has_home = await _team_rates(fixture.home_team_id, True)
+    away_rates, has_away = await _team_rates(fixture.away_team_id, False)
+    if not has_home or not has_away:
+        return None, None, False
+
+    p_home_scores_recent = (home_rates["scores_rate"] + away_rates["concedes_rate"]) / 2.0
+    p_away_scores_recent = (away_rates["scores_rate"] + home_rates["concedes_rate"]) / 2.0
+    p_btts_recent = _clamp(
+        0.7 * (p_home_scores_recent * p_away_scores_recent)
+        + 0.3 * ((home_rates["btts_rate"] + away_rates["btts_rate"]) / 2.0),
+        0.02,
+        0.98,
+    )
+    p_over25_recent = _clamp(
+        (home_rates["over25_rate"] + away_rates["over25_rate"]) / 2.0,
+        0.02,
+        0.98,
+    )
+    return p_btts_recent, p_over25_recent, True
+
+
+async def _profile_market_component(
+    db: AsyncSession,
+    fixture: Fixture,
+) -> tuple[float | None, bool]:
+    """BTTS estimate from season scoring/conceding and clean-sheet profiles."""
+    rows = await db.execute(
+        select(TeamSeasonProfile).where(
+            TeamSeasonProfile.league_id == fixture.league_id,
+            TeamSeasonProfile.season_year == fixture.season_year,
+            TeamSeasonProfile.team_id.in_([fixture.home_team_id, fixture.away_team_id]),
+        )
+    )
+    profiles = {row.team_id: row for row in rows.scalars().all()}
+    home = profiles.get(fixture.home_team_id)
+    away = profiles.get(fixture.away_team_id)
+    if home is None or away is None:
+        return None, False
+
+    home_scores = _clamp(
+        0.45
+        + 0.18 * (float(home.goals_scored_pg) - 1.2)
+        + 0.10 * (float(away.goals_conceded_pg) - 1.2)
+        - 0.15 * float(away.clean_sheet_rate),
+        0.05,
+        0.95,
+    )
+    away_scores = _clamp(
+        0.43
+        + 0.18 * (float(away.goals_scored_pg) - 1.1)
+        + 0.10 * (float(home.goals_conceded_pg) - 1.1)
+        - 0.15 * float(home.clean_sheet_rate),
+        0.05,
+        0.95,
+    )
+
+    profile_btts = _clamp(
+        (home_scores * away_scores) * 0.8
+        + 0.2 * (
+            (1.0 - float(home.clean_sheet_rate)) * (1.0 - float(away.clean_sheet_rate))
+        ),
+        0.02,
+        0.98,
+    )
+    return profile_btts, True
+
+
+def _blend_market_probability(
+    baseline: float,
+    recent: float | None,
+    h2h_rate: float | None,
+    h2h_matches: int,
+    recent_has_data: bool,
+    recent_weight: float,
+    h2h_weight: float,
+) -> float:
+    weight_sum = 1.0
+    blended = baseline
+
+    if recent_has_data and recent is not None:
+        blended += recent * recent_weight
+        weight_sum += recent_weight
+
+    if h2h_rate is not None and h2h_matches > 0:
+        effective_h2h_weight = h2h_weight * min(1.0, h2h_matches / 5.0)
+        blended += h2h_rate * effective_h2h_weight
+        weight_sum += effective_h2h_weight
+
+    return _clamp(blended / weight_sum, 0.01, 0.99)
 
 
 async def _home_adv_component(
@@ -328,9 +483,16 @@ async def compute_match_result_for_fixture(db: AsyncSession, fixture_id: int) ->
         confidence -= 0.10
 
     # 4. H2H component
-    h2h_probs, h2h_home_pct, has_h2h = await _h2h_component(db, fixture_id)
+    h2h_probs, h2h_home_pct, h2h_btts_rate, h2h_over25_rate, h2h_matches, has_h2h = await _h2h_component(db, fixture_id)
     if not has_h2h:
         confidence -= 0.10
+
+    recent_btts, recent_over25, has_recent_markets = await _recent_market_rates_component(db, fixture)
+    if not has_recent_markets:
+        confidence -= 0.05
+    profile_btts, has_profile_markets = await _profile_market_component(db, fixture)
+    if not has_profile_markets:
+        confidence -= 0.03
 
     # 5. Home advantage component (applied to base combination without injury)
     # Build weighted base first (without home_adv and injury)
@@ -410,6 +572,38 @@ async def compute_match_result_for_fixture(db: AsyncSession, fixture_id: int) ->
     )
 
     p_home_win, p_draw, p_away_win = _normalise_1x2(final_home, final_draw, final_away)
+    p_btts = _blend_market_probability(
+        baseline=p_btts,
+        recent=(
+            _clamp(
+                (
+                    (recent_btts if recent_btts is not None else p_btts)
+                    + (profile_btts if profile_btts is not None else p_btts)
+                ) / (
+                    (1 if recent_btts is not None else 0)
+                    + (1 if profile_btts is not None else 0)
+                ),
+                0.01,
+                0.99,
+            )
+            if (recent_btts is not None or profile_btts is not None)
+            else None
+        ),
+        h2h_rate=h2h_btts_rate,
+        h2h_matches=h2h_matches,
+        recent_has_data=has_recent_markets or has_profile_markets,
+        recent_weight=0.70,
+        h2h_weight=0.25,
+    )
+    p_over_25 = _blend_market_probability(
+        baseline=p_over_25,
+        recent=recent_over25,
+        h2h_rate=h2h_over25_rate,
+        h2h_matches=h2h_matches,
+        recent_has_data=has_recent_markets,
+        recent_weight=0.70,
+        h2h_weight=0.30,
+    )
     confidence = max(0.3, confidence)
 
     now = datetime.utcnow()

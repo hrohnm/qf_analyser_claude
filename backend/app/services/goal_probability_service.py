@@ -12,9 +12,10 @@ from app.models.fixture_goal_probability import FixtureGoalProbability
 from app.models.team_elo_snapshot import TeamEloSnapshot
 
 FINISHED_STATUSES = {"FT", "AET", "PEN"}
-MODEL_VERSION = "goal_prob_v1"
+MODEL_VERSION = "goal_prob_v2"
 RECENCY_ALPHA = 0.02
 WINDOW = 12
+SEASONS_LOOKBACK = 5
 
 
 def _clamp(value: float, lo: float, hi: float) -> float:
@@ -45,7 +46,8 @@ async def _recent_team_matches(
         select(Fixture)
         .where(
             Fixture.league_id == league_id,
-            Fixture.season_year == season_year,
+            Fixture.season_year >= season_year - (SEASONS_LOOKBACK - 1),
+            Fixture.season_year <= season_year,
             Fixture.status_short.in_(FINISHED_STATUSES),
             (Fixture.home_team_id == team_id) | (Fixture.away_team_id == team_id),
         )
@@ -68,7 +70,8 @@ async def _league_avg_goals_against(
         select(Fixture)
         .where(
             Fixture.league_id == league_id,
-            Fixture.season_year == season_year,
+            Fixture.season_year >= season_year - (SEASONS_LOOKBACK - 1),
+            Fixture.season_year <= season_year,
             Fixture.status_short.in_(FINISHED_STATUSES),
         )
     )

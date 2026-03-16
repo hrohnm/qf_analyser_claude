@@ -105,7 +105,7 @@ async def compute_h2h_for_fixture(
 
     now = datetime.utcnow()
 
-    if w_total <= 0 or len(h2h_fixtures) < MIN_MATCHES:
+    if w_total <= 0 or len(h2h_fixtures) == 0:
         # Fallback
         stmt = pg_insert(FixtureH2H).values(
             fixture_id=fixture_id,
@@ -152,7 +152,7 @@ async def compute_h2h_for_fixture(
         )
         await db.execute(stmt)
         await db.commit()
-        return {"fixture_id": fixture_id, "rows": 1, "h2h_matches": 0, "fallback": True}
+        return {"fixture_id": fixture_id, "rows": 1, "h2h_matches": 0, "fallback": True, "low_sample": False}
 
     h2h_home_win_pct = w_home_wins / w_total
     h2h_draw_pct = w_draws / w_total
@@ -229,7 +229,13 @@ async def compute_h2h_for_fixture(
     )
     await db.execute(stmt)
     await db.commit()
-    return {"fixture_id": fixture_id, "rows": 1, "h2h_matches": len(h2h_fixtures)}
+    return {
+        "fixture_id": fixture_id,
+        "rows": 1,
+        "h2h_matches": len(h2h_fixtures),
+        "fallback": False,
+        "low_sample": len(h2h_fixtures) < MIN_MATCHES,
+    }
 
 
 async def compute_h2h_for_league(

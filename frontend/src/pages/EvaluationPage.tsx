@@ -40,6 +40,31 @@ const DATE_OPTIONS = [
   { value: '30', label: 'Letzte 30 Tage' },
 ]
 
+function emitted1x2(row: EvaluationRow) {
+  const probs = [
+    { pick: 'H', prob: row.p_home_win },
+    { pick: 'D', prob: row.p_draw },
+    { pick: 'A', prob: row.p_away_win },
+  ].sort((a, b) => b.prob - a.prob)
+  const margin = probs[0].prob - probs[1].prob
+  const confidence = Math.max(0, Math.min(1, 0.65 * probs[0].prob + 0.35 * Math.min(1, margin / 0.20)))
+  return confidence >= 0.58 && margin >= 0.06
+}
+
+function emittedDc(row: EvaluationRow) {
+  const options = [
+    row.p_home_win + row.p_draw,
+    row.p_draw + row.p_away_win,
+    row.p_home_win + row.p_away_win,
+  ].sort((a, b) => b - a)
+  return options[0] >= 0.68 && (options[0] - options[1]) >= 0.04
+}
+
+function emittedBinary(prob: number | null, minConfidence: number) {
+  if (prob == null) return false
+  return Math.max(prob, 1 - prob) >= minConfidence
+}
+
 // ── Summary stats card ────────────────────────────────────────────────────────
 
 function SummaryCard({ rows }: { rows: EvaluationRow[] }) {
@@ -113,6 +138,83 @@ function SummaryCard({ rows }: { rows: EvaluationRow[] }) {
   )
 }
 
+function CoverageCard({ rows }: { rows: EvaluationRow[] }) {
+  if (!rows.length) return null
+
+  const items = [
+    {
+      label: '1X2',
+      covered: rows.filter(emitted1x2),
+      correct: (r: EvaluationRow) => r.outcome_correct,
+      color: 'blue',
+    },
+    {
+      label: 'DC',
+      covered: rows.filter(emittedDc),
+      correct: (r: EvaluationRow) => r.dc_correct === true,
+      color: 'indigo',
+    },
+    {
+      label: 'O1.5',
+      covered: rows.filter(r => emittedBinary(r.p_over_15, 0.67)),
+      correct: (r: EvaluationRow) => r.over_15_correct === true,
+      color: 'cyan',
+    },
+    {
+      label: 'O2.5',
+      covered: rows.filter(r => emittedBinary(r.p_over_25, 0.62)),
+      correct: (r: EvaluationRow) => r.over_25_correct,
+      color: 'violet',
+    },
+    {
+      label: 'BTTS',
+      covered: rows.filter(r => emittedBinary(r.p_btts, 0.62)),
+      correct: (r: EvaluationRow) => r.btts_correct,
+      color: 'teal',
+    },
+    {
+      label: 'H⚽',
+      covered: rows.filter(r => emittedBinary(r.p_home_scores, 0.64)),
+      correct: (r: EvaluationRow) => r.home_scores_correct === true,
+      color: 'orange',
+    },
+    {
+      label: 'A⚽',
+      covered: rows.filter(r => emittedBinary(r.p_away_scores, 0.64)),
+      correct: (r: EvaluationRow) => r.away_scores_correct === true,
+      color: 'grape',
+    },
+  ]
+
+  return (
+    <Card withBorder radius="md" p="md">
+      <Title order={5} mb="sm">Coverage vs Accuracy</Title>
+      <Grid gutter="xs">
+        {items.map(item => {
+          const coverage = item.covered.length
+          const coveragePct = rows.length ? (coverage / rows.length) * 100 : 0
+          const accuracy = coverage ? (item.covered.filter(item.correct).length / coverage) * 100 : 0
+          return (
+            <GridCol key={item.label} span={{ base: 6, sm: 4, md: 3 }}>
+              <Card withBorder p="xs" radius="sm">
+                <Group justify="space-between" mb={4}>
+                  <Text size="xs" fw={700}>{item.label}</Text>
+                  <Badge size="xs" color={item.color} variant="light">{coveragePct.toFixed(0)}% Cov</Badge>
+                </Group>
+                <Text size="lg" fw={800} c={accuracy >= 60 ? 'green' : accuracy >= 52 ? 'yellow' : 'red'}>
+                  {coverage ? `${accuracy.toFixed(0)}%` : '–'}
+                </Text>
+                <Text size="xs" c="dimmed">Accuracy auf emitted Picks</Text>
+                <Text size="10px" c="dimmed" mt={4}>{coverage}/{rows.length} Spiele</Text>
+              </Card>
+            </GridCol>
+          )
+        })}
+      </Grid>
+    </Card>
+  )
+}
+
 // ── Outcome badge ─────────────────────────────────────────────────────────────
 
 function OutcomeBadge({ correct, predicted, actual }: { correct: boolean; predicted: string; actual: string }) {
@@ -157,6 +259,7 @@ export function EvaluationPage() {
       ) : (
         <>
           <SummaryCard rows={data} />
+          <CoverageCard rows={data} />
           <LeagueBreakdown rows={data} />
 
           <Card withBorder radius="md" p={0} style={{ overflow: 'auto' }}>

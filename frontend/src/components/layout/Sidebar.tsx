@@ -119,11 +119,13 @@ export function Sidebar() {
   const isOnToday = location.pathname === '/'
   const isDataBrowser = location.pathname.startsWith('/liga') || location.pathname.startsWith('/team')
 
-  // Today's fixtures — used to know which leagues have games today
-  const todayStr = dayjs().format('YYYY-MM-DD')
+  // Fixtures für das gewählte Datum — bestimmt welche Ligen Spiele haben
+  const { spieltagOffset } = useUiStore()
+  const safeSpieltagOffset = Number.isFinite(spieltagOffset) ? spieltagOffset : 0
+  const selectedDateStr = dayjs().add(safeSpieltagOffset, 'day').format('YYYY-MM-DD')
   const { data: todayFixtures = [] } = useQuery({
-    queryKey: ['fixtures-today-enriched', todayStr],
-    queryFn: () => fixturesApi.todayEnriched(todayStr),
+    queryKey: ['fixtures-today-enriched', selectedDateStr],
+    queryFn: () => fixturesApi.todayEnriched(selectedDateStr),
     enabled: isOnToday,
     staleTime: 1000 * 60 * 5,
   })
@@ -139,7 +141,6 @@ export function Sidebar() {
     return acc
   }, {})
 
-  const allLeagues = leagues ?? []
   const favoriteLeagues = activeLeagues.filter(l => favoriteLeagueIds.includes(l.id))
 
   /* ── Spieltag: Liga-Filter ────────────────────────────────────────────── */

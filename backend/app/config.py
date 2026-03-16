@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     api_daily_limit: int = 7500
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
+    live_fixture_refresh_enabled: bool = True
+    live_fixture_refresh_interval_seconds: int = 300
 
     @property
     def cors_origins_list(self) -> list[str]:

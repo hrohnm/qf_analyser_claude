@@ -14,6 +14,10 @@ interface UiStore {
   // Aktiver Filter auf der Spieltag-Seite
   activeLeagueFilter: number | null
   setActiveLeagueFilter: (id: number | null) => void
+
+  // Datum-Offset für die Spieltag-Seite (0 = heute, ±N Tage)
+  spieltagOffset: number
+  setSpieltagOffset: (offset: number | ((prev: number) => number)) => void
 }
 
 const currentSeason = new Date().getMonth() >= 6
@@ -39,6 +43,12 @@ export const useUiStore = create<UiStore>()(
 
       activeLeagueFilter: null,
       setActiveLeagueFilter: (id) => set({ activeLeagueFilter: id }),
+
+      spieltagOffset: 0,
+      setSpieltagOffset: (offset) => set((state) => {
+        const next = typeof offset === 'function' ? offset(state.spieltagOffset) : offset
+        return { spieltagOffset: Number.isFinite(next) ? next : 0 }
+      }),
     }),
     {
       name: 'qf-ui-store',

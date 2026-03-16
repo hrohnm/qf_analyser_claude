@@ -137,6 +137,13 @@ export interface TeamProfileRow {
   model_version: string
 }
 
+export interface LiveRefreshSettings {
+  enabled: boolean
+  interval_seconds: number
+  interval_minutes: number
+  min_interval_seconds: number
+}
+
 export const leaguesApi = {
   list: () => apiClient.get<League[]>('/leagues/').then(r => r.data),
   config: () => apiClient.get<League[]>('/leagues/config').then(r => r.data),
@@ -438,9 +445,23 @@ export const adminApi = {
 
 export const syncApi = {
   budget: () => apiClient.get<Budget>('/sync/budget').then(r => r.data),
+  liveRefreshSettings: () =>
+    apiClient.get<LiveRefreshSettings>('/sync/live-refresh/settings').then(r => r.data),
+  updateLiveRefreshSettings: (payload: { enabled?: boolean; interval_seconds?: number }) =>
+    apiClient.patch<LiveRefreshSettings>('/sync/live-refresh/settings', payload).then(r => r.data),
   triggerFixtures: (season_year?: number) =>
     apiClient.post<SyncResult>('/sync/fixtures/run', null, {
       params: season_year ? { season_year } : {},
+    }).then(r => r.data),
+  refreshLiveToday: (seasonYear = 2025) =>
+    apiClient.post<{
+      message: string
+      season_year: number
+      leagues: number
+      fixtures: number
+      results: Array<Record<string, unknown>>
+    }>('/sync/fixtures/live-today/run', null, {
+      params: { season_year: seasonYear },
     }).then(r => r.data),
   recomputeForm: (seasonYear: number, windowSize = 5, leagueId?: number) =>
     apiClient.post('/sync/form/run', null, {

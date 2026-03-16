@@ -1,17 +1,18 @@
 import {
   Stack, Title, Group, Text, Badge, Loader, Center,
-  Box, Image, ActionIcon, Tooltip, Divider, Paper,
+  Box, Image, ActionIcon, Tooltip, Divider, Paper, Button, Select,
 } from '@mantine/core'
 import {
   IconChevronLeft, IconChevronRight, IconCalendar,
-  IconRefresh, IconStarFilled, IconFlame,
+  IconRefresh, IconStarFilled, IconFlame, IconPlayerPause, IconPlayerPlay,
 } from '@tabler/icons-react'
-import { useQuery } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMutation, useQuery } from '@tanstack/react-query'
+
 import { useNavigate } from 'react-router-dom'
 import dayjs from 'dayjs'
 import 'dayjs/locale/de'
-import { fixturesApi, type EnrichedFixture } from '../api'
+import { useEffect, useRef, useState } from 'react'
+import { bettingSlipsApi, fixturesApi, syncApi, type EnrichedFixture } from '../api'
 import { MatchRow, MATCH_ROW_GRID } from '../components/common/MatchRow'
 import { leagueLogoUrl, countryFlagUrl, COUNTRY_FLAGS } from '../types'
 import { useUiStore } from '../store/uiStore'
@@ -19,6 +20,14 @@ import { useUiStore } from '../store/uiStore'
 dayjs.locale('de')
 
 const COUNTRY_ORDER = ['Germany', 'England', 'Spain', 'France', 'Italy', 'Turkey']
+const DEFAULT_AUTO_REFRESH_SECONDS = 300
+const REFRESH_INTERVAL_OPTIONS = [
+  { value: '1', label: '1 Minute' },
+  { value: '2', label: '2 Minuten' },
+  { value: '5', label: '5 Minuten' },
+  { value: '10', label: '10 Minuten' },
+  { value: '15', label: '15 Minuten' },
+]
 const COUNTRY_NAMES: Record<string, string> = {
   Germany: 'Deutschland', England: 'England', Spain: 'Spanien',
   France: 'Frankreich', Italy: 'Italien', Turkey: 'Türkei',
@@ -43,6 +52,106 @@ function groupByCountryAndLeague(fixtures: EnrichedFixture[]) {
     result[country][lid].fixtures.push(f)
   }
   return result
+}
+
+function countrySortIndex(country: string) {
+  const idx = COUNTRY_ORDER.indexOf(country)
+  return idx === -1 ? COUNTRY_ORDER.length : idx
+}
+
+function sortFixturesByCountryLeague(fixtures: EnrichedFixture[]) {
+  return [...fixtures].sort((a, b) => {
+    const countryA = a.league_country ?? 'Sonstige'
+    const countryB = b.league_country ?? 'Sonstige'
+    const countryDiff = countrySortIndex(countryA) - countrySortIndex(countryB)
+    if (countryDiff !== 0) return countryDiff
+    if (countryA !== countryB) return countryA.localeCompare(countryB)
+
+    const tierA = a.league_tier ?? 99
+    const tierB = b.league_tier ?? 99
+    if (tierA !== tierB) return tierA - tierB
+
+    const leagueA = a.league_name ?? ''
+    const leagueB = b.league_name ?? ''
+    if (leagueA !== leagueB) return leagueA.localeCompare(leagueB)
+
+    const kickoffA = a.kickoff_utc ?? ''
+    const kickoffB = b.kickoff_utc ?? ''
+    if (kickoffA !== kickoffB) return kickoffA.localeCompare(kickoffB)
+
+    return a.id - b.id
+  })
+}
+
+type SlipTip = {
+  source: 'ai' | 'pattern'
+  slipName: string
+  market: string
+  pick: string | null
+}
+
+function buildSlipTipsMap(rawSlipData: Array<{ source: 'ai' | 'pattern'; data: any }>): Map<number, SlipTip[]> {
+  const map = new Map<number, SlipTip[]>()
+
+  for (const entry of rawSlipData) {
+    const slips = entry.data?.slips?.slips ?? []
+    for (const slip of slips) {
+      const slipName = slip.name || `Schein ${slip.slip_nr}`
+      for (const pick of (slip.picks ?? [])) {
+        const fixtureId = pick.fixture_id
+        if (typeof fixtureId !== 'number') continue
+        const current = map.get(fixtureId) ?? []
+        current.push({
+          source: entry.source,
+          slipName,
+          market: pick.market ?? 'Tipp',
+          pick: pick.pick ?? null,
+        })
+        map.set(fixtureId, current)
+      }
+    }
+  }
+
+  return map
+}
+
+function liveSnapshot(fixtures: EnrichedFixture[]): string {
+  return fixtures
+    .filter(f => ['1H', 'HT', '2H'].includes(f.status_short ?? ''))
+    .map(f => `${f.id}:${f.status_short}:${f.home_score ?? '-'}:${f.away_score ?? '-'}`)
+    .sort()
+    .join('|')
+}
+
+function scoreSnapshot(fixtures: EnrichedFixture[]): Map<number, string> {
+  return new Map(
+    fixtures.map(f => [f.id, `${f.home_score ?? '-'}:${f.away_score ?? '-'}`])
+  )
+}
+
+function playRefreshTone() {
+  if (typeof window === 'undefined') return
+  const AudioCtx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+  if (!AudioCtx) return
+
+  const context = new AudioCtx()
+  const oscillator = context.createOscillator()
+  const gain = context.createGain()
+
+  oscillator.type = 'sine'
+  oscillator.frequency.setValueAtTime(880, context.currentTime)
+  oscillator.frequency.exponentialRampToValueAtTime(660, context.currentTime + 0.18)
+  gain.gain.setValueAtTime(0.0001, context.currentTime)
+  gain.gain.exponentialRampToValueAtTime(0.045, context.currentTime + 0.02)
+  gain.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.22)
+
+  oscillator.connect(gain)
+  gain.connect(context.destination)
+  oscillator.start()
+  oscillator.stop(context.currentTime + 0.23)
+  oscillator.onended = () => {
+    void context.close()
+  }
 }
 
 // ─── Table Column Header ───────────────────────────────────────────────────
@@ -81,6 +190,8 @@ function LeagueBlock({
   showHeader,
   onClick,
   onRowClick,
+  slipTipsMap,
+  scoreChangedIds,
 }: {
   leagueId: number
   leagueName: string
@@ -90,6 +201,8 @@ function LeagueBlock({
   showHeader: boolean
   onClick: () => void
   onRowClick: (id: number) => void
+  slipTipsMap: Map<number, SlipTip[]>
+  scoreChangedIds: Set<number>
 }) {
   const liveCount = fixtures.filter(f => ['1H', 'HT', '2H'].includes(f.status_short ?? '')).length
 
@@ -152,7 +265,12 @@ function LeagueBlock({
               className="match-row-hover"
               style={{ transition: 'background 0.1s' }}
             >
-              <MatchRow fixture={f} onClick={() => onRowClick(f.id)} />
+              <MatchRow
+                fixture={f}
+                slipTips={slipTipsMap.get(f.id) ?? []}
+                scoreChanged={scoreChangedIds.has(f.id)}
+                onClick={() => onRowClick(f.id)}
+              />
             </Box>
           </Box>
         ))}
@@ -165,11 +283,26 @@ function LeagueBlock({
 function LiveHighlights({
   fixtures,
   onRowClick,
+  slipTipsMap,
+  scoreChangedIds,
 }: {
   fixtures: EnrichedFixture[]
   onRowClick: (id: number) => void
+  slipTipsMap: Map<number, SlipTip[]>
+  scoreChangedIds: Set<number>
 }) {
   if (!fixtures.length) return null
+
+  const liveGroups = fixtures.reduce<Array<{ country: string; fixtures: EnrichedFixture[] }>>((acc, fixture) => {
+    const country = fixture.league_country ?? 'Sonstige'
+    const current = acc[acc.length - 1]
+    if (current && current.country === country) {
+      current.fixtures.push(fixture)
+      return acc
+    }
+    acc.push({ country, fixtures: [fixture] })
+    return acc
+  }, [])
 
   return (
     <Box style={{
@@ -206,10 +339,32 @@ function LiveHighlights({
       <ColumnHeaders />
 
       <Stack gap={0}>
-        {fixtures.map((f, i) => (
-          <Box key={f.id}>
-            {i > 0 && <Divider style={{ margin: '0 12px' }} />}
-            <MatchRow fixture={f} onClick={() => onRowClick(f.id)} />
+        {liveGroups.map((group, groupIndex) => (
+          <Box key={group.country}>
+            {groupIndex > 0 && <Divider my={4} />}
+            <Group gap={6} px="sm" py={6}>
+              <Image
+                src={countryFlagUrl(group.country)}
+                w={16}
+                h={12}
+                fit="contain"
+                fallbackSrc="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
+              />
+              <Text size="10px" fw={700} tt="uppercase" c="dimmed" style={{ letterSpacing: '0.07em' }}>
+                {COUNTRY_FLAGS[group.country] ?? ''} {COUNTRY_NAMES[group.country] ?? group.country}
+              </Text>
+            </Group>
+            {group.fixtures.map((f, i) => (
+              <Box key={f.id}>
+                {(i > 0 || groupIndex > 0) && <Divider style={{ margin: '0 12px' }} />}
+                <MatchRow
+                  fixture={f}
+                  slipTips={slipTipsMap.get(f.id) ?? []}
+                  scoreChanged={scoreChangedIds.has(f.id)}
+                  onClick={() => onRowClick(f.id)}
+                />
+              </Box>
+            ))}
           </Box>
         ))}
       </Stack>
@@ -220,22 +375,73 @@ function LiveHighlights({
 // ─── TodayPage ─────────────────────────────────────────────────────────────
 export function TodayPage() {
   const navigate = useNavigate()
-  const [offset, setOffset] = useState(0)
-  const activeDate = dayjs().add(offset, 'day')
+  const { spieltagOffset: offset, setSpieltagOffset: setOffset } = useUiStore()
+  const safeOffset = Number.isFinite(offset) ? offset : 0
+  const activeDate = dayjs().add(safeOffset, 'day')
   const dateStr = toDateStr(activeDate)
 
   const { activeLeagueFilter, favoriteLeagueIds } = useUiStore()
+  const audioArmedRef = useRef(false)
+  const previousLiveSnapshotRef = useRef<string | null>(null)
+  const previousScoreSnapshotRef = useRef<Map<number, string>>(new Map())
+  const highlightTimeoutRef = useRef<number | null>(null)
+  const [scoreChangedIds, setScoreChangedIds] = useState<Set<number>>(new Set())
+  const [refreshCountdown, setRefreshCountdown] = useState(DEFAULT_AUTO_REFRESH_SECONDS)
+
+  const {
+    data: liveRefreshSettings,
+    refetch: refetchLiveRefreshSettings,
+  } = useQuery({
+    queryKey: ['live-refresh-settings'],
+    queryFn: () => syncApi.liveRefreshSettings(),
+    staleTime: 15_000,
+    refetchInterval: safeOffset === 0 ? 30_000 : false,
+  })
+
+  const autoRefreshEnabled = liveRefreshSettings?.enabled ?? true
+  const autoRefreshSeconds = liveRefreshSettings?.interval_seconds ?? DEFAULT_AUTO_REFRESH_SECONDS
+  const autoRefreshMs = autoRefreshSeconds * 1000
 
   const { data: fixtures = [], isLoading, refetch } = useQuery({
     queryKey: ['fixtures-today-enriched', dateStr],
     queryFn: () => fixturesApi.todayEnriched(dateStr),
     staleTime: 1000 * 60 * 5,
+    refetchInterval: safeOffset === 0 && autoRefreshEnabled ? autoRefreshMs : false,
   })
 
-  const isToday = offset === 0
+  const { data: patternSlips } = useQuery({
+    queryKey: ['betting-slips', dateStr, 'pattern', 'matchday'],
+    queryFn: () => bettingSlipsApi.get(dateStr, 'pattern'),
+    retry: false,
+    staleTime: 30_000,
+  })
+
+  const { data: aiSlips } = useQuery({
+    queryKey: ['betting-slips', dateStr, 'ai', 'matchday'],
+    queryFn: () => bettingSlipsApi.get(dateStr, 'ai'),
+    retry: false,
+    staleTime: 30_000,
+  })
+
+  const liveRefreshMutation = useMutation({
+    mutationFn: () => syncApi.refreshLiveToday(2025),
+    onSuccess: async () => {
+      await refetch()
+    },
+  })
+
+  const liveRefreshSettingsMutation = useMutation({
+    mutationFn: (payload: { enabled?: boolean; interval_seconds?: number }) =>
+      syncApi.updateLiveRefreshSettings(payload),
+    onSuccess: async () => {
+      await refetchLiveRefreshSettings()
+    },
+  })
+
+  const isToday = safeOffset === 0
   const dateLabel = isToday ? 'Heute'
-    : offset === 1 ? 'Morgen'
-    : offset === -1 ? 'Gestern'
+    : safeOffset === 1 ? 'Morgen'
+    : safeOffset === -1 ? 'Gestern'
     : activeDate.format('dddd, DD. MMMM')
 
   // Filter
@@ -243,12 +449,18 @@ export function TodayPage() {
     ? fixtures.filter(f => f.league_id === activeLeagueFilter)
     : fixtures
 
-  const liveFixtures = visibleFixtures.filter(f => ['1H', 'HT', '2H'].includes(f.status_short ?? ''))
+  const liveFixtures = sortFixturesByCountryLeague(
+    visibleFixtures.filter(f => ['1H', 'HT', '2H'].includes(f.status_short ?? ''))
+  )
   const nonLiveFixtures = visibleFixtures.filter(f => !['1H', 'HT', '2H'].includes(f.status_short ?? ''))
 
   const finishedCount = fixtures.filter(f => ['FT', 'AET', 'PEN'].includes(f.status_short ?? '')).length
   const liveCount = fixtures.filter(f => ['1H', 'HT', '2H'].includes(f.status_short ?? '')).length
   const nsCount = fixtures.filter(f => f.status_short === 'NS').length
+  const slipTipsMap = buildSlipTipsMap([
+    { source: 'pattern', data: patternSlips },
+    { source: 'ai', data: aiSlips },
+  ])
 
   // Gruppenreihenfolge: Favoriten-Länder vorn
   const grouped = groupByCountryAndLeague(nonLiveFixtures)
@@ -260,6 +472,95 @@ export function TodayPage() {
     ...COUNTRY_ORDER.filter(c => !favCountries.includes(c)),
     ...Object.keys(grouped).filter(c => !COUNTRY_ORDER.includes(c) && !favCountries.includes(c)),
   ].filter(c => grouped[c])
+
+  useEffect(() => {
+    const unlockAudio = () => {
+      audioArmedRef.current = true
+    }
+
+    window.addEventListener('pointerdown', unlockAudio, { once: true })
+    return () => {
+      window.removeEventListener('pointerdown', unlockAudio)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isToday) {
+      previousLiveSnapshotRef.current = null
+      previousScoreSnapshotRef.current = new Map()
+      setScoreChangedIds(new Set())
+      setRefreshCountdown(autoRefreshSeconds)
+      return
+    }
+
+    const snapshot = liveSnapshot(fixtures)
+    const scores = scoreSnapshot(fixtures)
+    if (previousLiveSnapshotRef.current === null) {
+      previousLiveSnapshotRef.current = snapshot
+      previousScoreSnapshotRef.current = scores
+      return
+    }
+
+    const changedIds = new Set<number>()
+    for (const fixture of fixtures) {
+      const previousScore = previousScoreSnapshotRef.current.get(fixture.id)
+      const currentScore = scores.get(fixture.id)
+      if (
+        previousScore != null &&
+        currentScore != null &&
+        previousScore !== currentScore &&
+        ['1H', 'HT', '2H', 'FT', 'AET', 'PEN'].includes(fixture.status_short ?? '')
+      ) {
+        changedIds.add(fixture.id)
+      }
+    }
+
+    if (
+      snapshot &&
+      snapshot !== previousLiveSnapshotRef.current &&
+      audioArmedRef.current
+    ) {
+      playRefreshTone()
+    }
+
+    if (changedIds.size > 0) {
+      setScoreChangedIds(changedIds)
+      if (highlightTimeoutRef.current) {
+        window.clearTimeout(highlightTimeoutRef.current)
+      }
+      highlightTimeoutRef.current = window.setTimeout(() => {
+        setScoreChangedIds(new Set())
+        highlightTimeoutRef.current = null
+      }, 10000)
+    }
+
+    previousLiveSnapshotRef.current = snapshot
+    previousScoreSnapshotRef.current = scores
+  }, [fixtures, isToday, autoRefreshSeconds])
+
+  useEffect(() => () => {
+    if (highlightTimeoutRef.current) {
+      window.clearTimeout(highlightTimeoutRef.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isToday) return
+
+    if (!autoRefreshEnabled) {
+      setRefreshCountdown(autoRefreshSeconds)
+      return
+    }
+
+    setRefreshCountdown(autoRefreshSeconds)
+    const interval = window.setInterval(() => {
+      setRefreshCountdown(prev => (prev <= 1 ? autoRefreshSeconds : prev - 1))
+    }, 1000)
+
+    return () => {
+      window.clearInterval(interval)
+    }
+  }, [isToday, dateStr, autoRefreshEnabled, autoRefreshSeconds])
 
   return (
     <Stack gap="md">
@@ -276,7 +577,7 @@ export function TodayPage() {
 
         {/* Datums-Navigation */}
         <Group gap="xs">
-          <ActionIcon variant="subtle" onClick={() => setOffset(o => o - 1)}>
+          <ActionIcon variant="subtle" onClick={() => setOffset(safeOffset - 1)}>
             <IconChevronLeft size={18} />
           </ActionIcon>
           <Group gap={6} style={{ minWidth: 180, justifyContent: 'center' }}>
@@ -284,7 +585,7 @@ export function TodayPage() {
             <Text fw={600} size="sm">{dateLabel}</Text>
             <Text c="dimmed" size="xs">{activeDate.format('DD.MM.YYYY')}</Text>
           </Group>
-          <ActionIcon variant="subtle" onClick={() => setOffset(o => o + 1)}>
+          <ActionIcon variant="subtle" onClick={() => setOffset(safeOffset + 1)}>
             <IconChevronRight size={18} />
           </ActionIcon>
           {isToday && (
@@ -293,6 +594,53 @@ export function TodayPage() {
                 <IconRefresh size={16} />
               </ActionIcon>
             </Tooltip>
+          )}
+          {isToday && (
+            <Tooltip label="Live-Zwischenstände aktualisieren">
+              <Button
+                size="xs"
+                variant="light"
+                color="orange"
+                leftSection={<IconRefresh size={14} />}
+                loading={liveRefreshMutation.isPending}
+                disabled={liveRefreshMutation.isPending || liveCount === 0}
+                onClick={() => liveRefreshMutation.mutate()}
+              >
+                Live aktualisieren
+              </Button>
+            </Tooltip>
+          )}
+          {isToday && (
+            <Group gap="xs" wrap="nowrap">
+              <Button
+                size="xs"
+                variant={autoRefreshEnabled ? 'default' : 'light'}
+                color={autoRefreshEnabled ? 'gray' : 'green'}
+                leftSection={autoRefreshEnabled ? <IconPlayerPause size={14} /> : <IconPlayerPlay size={14} />}
+                loading={liveRefreshSettingsMutation.isPending}
+                onClick={() => liveRefreshSettingsMutation.mutate({ enabled: !autoRefreshEnabled })}
+              >
+                {autoRefreshEnabled ? 'Auto pausieren' : 'Auto starten'}
+              </Button>
+              <Select
+                size="xs"
+                w={130}
+                data={REFRESH_INTERVAL_OPTIONS}
+                value={String(Math.round(autoRefreshSeconds / 60))}
+                disabled={liveRefreshSettingsMutation.isPending}
+                onChange={(value) => {
+                  if (!value) return
+                  const intervalSeconds = Number(value) * 60
+                  if (intervalSeconds === autoRefreshSeconds) return
+                  liveRefreshSettingsMutation.mutate({ interval_seconds: intervalSeconds })
+                }}
+              />
+              <Badge size="sm" variant="light" color={autoRefreshEnabled ? 'gray' : 'yellow'}>
+                {autoRefreshEnabled
+                  ? `Nächste Aktualisierung in ${refreshCountdown}s`
+                  : 'Auto-Refresh pausiert'}
+              </Badge>
+            </Group>
           )}
         </Group>
 
@@ -326,6 +674,8 @@ export function TodayPage() {
           {liveFixtures.length > 0 && (
             <LiveHighlights
               fixtures={liveFixtures}
+              slipTipsMap={slipTipsMap}
+              scoreChangedIds={scoreChangedIds}
               onRowClick={(id) => navigate(`/spiel/${id}`)}
             />
           )}
@@ -364,13 +714,15 @@ export function TodayPage() {
                       leagueName={leagueData.leagueName}
                       leagueCountry={country}
                       fixtures={leagueData.fixtures}
-                      isFavorite={favoriteLeagueIds.includes(leagueId)}
-                      showHeader
-                      onClick={() => navigate(`/liga/${leagueId}`)}
-                      onRowClick={(id) => navigate(`/spiel/${id}`)}
-                    />
-                  )
-                })}
+                    isFavorite={favoriteLeagueIds.includes(leagueId)}
+                    showHeader
+                    onClick={() => navigate(`/liga/${leagueId}`)}
+                    onRowClick={(id) => navigate(`/spiel/${id}`)}
+                    slipTipsMap={slipTipsMap}
+                    scoreChangedIds={scoreChangedIds}
+                  />
+                )
+              })}
               </Stack>
             )
           })}

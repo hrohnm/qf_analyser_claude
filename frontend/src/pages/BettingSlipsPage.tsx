@@ -57,45 +57,46 @@ const COUNTRY_ABBR: Record<string, string> = {
 }
 
 // Fallback: derive country from known league names (for slips generated before country field was added)
-const LEAGUE_TO_COUNTRY: Record<string, string> = {
+const LEAGUE_TO_COUNTRY: Array<[string, string]> = [
   // Germany
-  'Bundesliga': 'Germany', '2. Bundesliga': 'Germany', '3. Liga': 'Germany',
+  ['Bundesliga', 'Germany'], ['2. Bundesliga', 'Germany'], ['3. Liga', 'Germany'],
   // France
-  'Ligue 1': 'France', 'Ligue 2': 'France', 'National': 'France',
+  ['Ligue 1', 'France'], ['Ligue 2', 'France'], ['National', 'France'],
   // Italy
-  'Serie A': 'Italy', 'Serie B': 'Italy',
-  'Serie C - Girone A': 'Italy', 'Serie C - Girone B': 'Italy', 'Serie C - Girone C': 'Italy',
+  ['Serie A', 'Italy'], ['Serie B', 'Italy'],
+  ['Serie C - Girone A', 'Italy'], ['Serie C - Girone B', 'Italy'], ['Serie C - Girone C', 'Italy'],
   // Spain
-  'La Liga': 'Spain', 'Segunda División': 'Spain', 'Primera Federación': 'Spain',
+  ['La Liga', 'Spain'], ['Segunda División', 'Spain'], ['Primera Federación', 'Spain'],
   // England
-  'Premier League': 'England', 'Championship': 'England', 'League One': 'England', 'League Two': 'England',
+  ['Premier League', 'England'], ['Championship', 'England'], ['League One', 'England'], ['League Two', 'England'],
   // Turkey
-  'Süper Lig': 'Turkey', '1. Lig': 'Turkey', '2. Lig': 'Turkey',
+  ['Süper Lig', 'Turkey'], ['1. Lig', 'Turkey'], ['2. Lig', 'Turkey'],
   // Netherlands
-  'Eredivisie': 'Netherlands', 'Eerste Divisie': 'Netherlands',
+  ['Eredivisie', 'Netherlands'], ['Eerste Divisie', 'Netherlands'],
   // Belgium
-  'Jupiler Pro League': 'Belgium', 'Challenger Pro League': 'Belgium', 'First Amateur Division': 'Belgium',
+  ['Jupiler Pro League', 'Belgium'], ['Challenger Pro League', 'Belgium'], ['First Amateur Division', 'Belgium'],
   // Portugal
-  'Primeira Liga': 'Portugal', 'Liga Portugal 2': 'Portugal', 'Segunda Liga': 'Portugal',
+  ['Primeira Liga', 'Portugal'], ['Liga Portugal 2', 'Portugal'], ['Segunda Liga', 'Portugal'],
   // Scotland
-  'Premiership': 'Scotland', 'Championship': 'Scotland',
+  ['Premiership', 'Scotland'], ['Championship', 'Scotland'],
   // Austria
-  'Bundesliga': 'Austria',  // note: same name — resolved via country field from backend
+  ['Bundesliga', 'Austria'], // ambiguous name; current slips should provide country from backend
   // Switzerland
-  'Super League': 'Switzerland', 'Challenge League': 'Switzerland',
+  ['Super League', 'Switzerland'], ['Challenge League', 'Switzerland'],
   // Greece
-  'Super League 1': 'Greece', 'Super League 2': 'Greece',
+  ['Super League 1', 'Greece'], ['Super League 2', 'Greece'],
   // Poland
-  'Ekstraklasa': 'Poland', 'I Liga': 'Poland',
-  'II Liga - East': 'Poland', 'II Liga - West': 'Poland', 'II Liga': 'Poland',
+  ['Ekstraklasa', 'Poland'], ['I Liga', 'Poland'],
+  ['II Liga - East', 'Poland'], ['II Liga - West', 'Poland'], ['II Liga', 'Poland'],
   // Saudi Arabia
-  'Pro League': 'Saudi-Arabia', 'Division 1': 'Saudi-Arabia', 'Division 2': 'Saudi-Arabia',
+  ['Pro League', 'Saudi-Arabia'], ['Division 1', 'Saudi-Arabia'], ['Division 2', 'Saudi-Arabia'],
   // UEFA
-  'UEFA Champions League': 'Europe', 'UEFA Europa League': 'Europe', 'UEFA Conference League': 'Europe',
-}
+  ['UEFA Champions League', 'Europe'], ['UEFA Europa League', 'Europe'], ['UEFA Conference League', 'Europe'],
+]
 
 function resolveCountry(country: string, league: string): string {
-  return country || LEAGUE_TO_COUNTRY[league] || ''
+  if (country) return country
+  return LEAGUE_TO_COUNTRY.find(([leagueName]) => leagueName === league)?.[1] || ''
 }
 
 function countryAbbr(country: string, league = ''): string {
@@ -104,20 +105,6 @@ function countryAbbr(country: string, league = ''): string {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function resultColor(r: string | null) {
-  if (r === 'win') return 'green'
-  if (r === 'loss') return 'red'
-  if (r === 'push') return 'yellow'
-  return 'gray'
-}
-
-function oddColor(odd: number | null) {
-  if (!odd) return 'gray'
-  if (odd >= 2.5) return 'red'
-  if (odd >= 1.6) return 'orange'
-  return 'green'
-}
 
 function targetColor(combined: number) {
   if (combined >= 8 && combined <= 12) return 'green'
@@ -137,6 +124,22 @@ function statusLabel(status: string) {
   if (status === 'lost') return 'Verloren'
   if (status === 'void') return 'Void'
   return 'Angespielt'
+}
+
+function fixtureStatusLabel(status: string | null | undefined) {
+  if (!status) return null
+  if (status === 'NS') return 'Nicht gestartet'
+  if (status === 'HT') return 'Halbzeit'
+  if (status === '1H' || status === '2H') return status
+  if (status === 'FT' || status === 'AET' || status === 'PEN') return 'Beendet'
+  return status
+}
+
+function fixtureStatusColor(status: string | null | undefined) {
+  if (!status) return 'gray'
+  if (status === '1H' || status === 'HT' || status === '2H') return 'orange'
+  if (status === 'FT' || status === 'AET' || status === 'PEN') return 'green'
+  return 'gray'
 }
 
 // ─── Stats bar ────────────────────────────────────────────────────────────────
@@ -238,13 +241,35 @@ function SlipCard({
   const potentialReturn = previewStake > 0 && previewOdd > 0 ? previewStake * (1 - TAX) * previewOdd : null
 
   // Group picks by fixture_id for Betano-style game rows
-  const gameGroups: { fixtureId: number; home: string; away: string; league: string; country: string; kickoff: string; picks: any[] }[] = []
+  const gameGroups: {
+    fixtureId: number
+    home: string
+    away: string
+    league: string
+    country: string
+    kickoff: string
+    statusShort?: string | null
+    homeScore?: number | null
+    awayScore?: number | null
+    picks: any[]
+  }[] = []
   const seen = new Map<number, number>()
   for (const pick of picks) {
     const fid = pick.fixture_id
     if (!seen.has(fid)) {
       seen.set(fid, gameGroups.length)
-      gameGroups.push({ fixtureId: fid, home: pick.home, away: pick.away, league: pick.league, country: pick.country ?? '', kickoff: pick.kickoff, picks: [] })
+      gameGroups.push({
+        fixtureId: fid,
+        home: pick.home,
+        away: pick.away,
+        league: pick.league,
+        country: pick.country ?? '',
+        kickoff: pick.kickoff,
+        statusShort: pick.fixture_status_short ?? null,
+        homeScore: pick.fixture_home_score ?? null,
+        awayScore: pick.fixture_away_score ?? null,
+        picks: [],
+      })
     }
     gameGroups[seen.get(fid)!].picks.push(pick)
   }
@@ -353,9 +378,17 @@ function SlipCard({
                       <Badge size="xs" color="gray" variant="filled" radius="sm" style={{ flexShrink: 0 }}>BB</Badge>
                       <Stack gap={0} style={{ minWidth: 0 }}>
                         <Text size="xs" fw={700} truncate>{game.home} – {game.away}</Text>
-                        <Text size="xs" c="dimmed" truncate>
-                          {countryAbbr(game.country, game.league)} · {game.league} · {game.kickoff}
-                        </Text>
+                        <Group gap={6} wrap="wrap">
+                          <Text size="xs" c="dimmed" truncate>
+                            {countryAbbr(game.country, game.league)} · {game.league} · {game.kickoff}
+                          </Text>
+                          {game.statusShort && (
+                            <Badge size="xs" color={fixtureStatusColor(game.statusShort)} variant="light">
+                              {fixtureStatusLabel(game.statusShort)}
+                              {game.homeScore != null && game.awayScore != null ? ` · ${game.homeScore}:${game.awayScore}` : ''}
+                            </Badge>
+                          )}
+                        </Group>
                       </Stack>
                     </Group>
                     <PickDot result={bbResult} />
@@ -383,9 +416,17 @@ function SlipCard({
                           {pick.pick ? <Text span c="dimmed"> · {pick.pick}</Text> : null}
                         </Text>
                         {!hasBB && (
-                          <Text size="xs" c="dimmed" truncate>
-                            {countryAbbr(pick.country ?? '', pick.league)} · {pick.league} · {pick.home} – {pick.away} · {pick.kickoff}
-                          </Text>
+                          <Group gap={6} wrap="wrap">
+                            <Text size="xs" c="dimmed" truncate>
+                              {countryAbbr(pick.country ?? '', pick.league)} · {pick.league} · {pick.home} – {pick.away} · {pick.kickoff}
+                            </Text>
+                            {pick.fixture_status_short && (
+                              <Badge size="xs" color={fixtureStatusColor(pick.fixture_status_short)} variant="light">
+                                {fixtureStatusLabel(pick.fixture_status_short)}
+                                {pick.fixture_home_score != null && pick.fixture_away_score != null ? ` · ${pick.fixture_home_score}:${pick.fixture_away_score}` : ''}
+                              </Badge>
+                            )}
+                          </Group>
                         )}
                       </Stack>
                     </Group>

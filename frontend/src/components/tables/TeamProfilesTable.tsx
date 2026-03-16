@@ -1,9 +1,8 @@
 import {
-  Badge, Group, Image, Progress, ScrollArea, Select, Stack, Table, Text, Tooltip,
+  Badge, Group, Progress, ScrollArea, Select, Stack, Table, Text, Tooltip,
 } from '@mantine/core'
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { leaguesApi, type TeamProfileRow } from '../../api'
+import { leaguesApi } from '../../api'
 import { useQuery } from '@tanstack/react-query'
 import { teamLogoUrl } from '../../types'
 

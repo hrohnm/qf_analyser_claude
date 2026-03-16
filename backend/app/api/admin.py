@@ -26,6 +26,7 @@ from app.services.scoreline_service import compute_scoreline_for_league
 from app.services.match_result_probability_service import compute_match_result_for_league
 from app.services.value_bet_service import compute_value_bets_for_league
 from app.services.team_profile_service import compute_team_profiles_for_league
+from app.services.top_scorer_service import compute_top_scorer_for_league
 
 router = APIRouter(prefix="/admin", tags=["Administration"])
 
@@ -302,7 +303,7 @@ async def activate_and_sync(
                 [league_id], season_year=season_year
             )
 
-            # Phase 3: Pattern compute (Elo, Form, GoalTiming, HomeAdv, H2H, Scoreline, MRP, ValueBets)
+            # Phase 3: Pattern compute (Elo, Form, GoalTiming, HomeAdv, H2H, Scoreline, MRP, ValueBets, TopScorer)
             _sync_status[league_id]["phase"] = "patterns"
             async with AsyncSessionLocal() as db:
                 await recompute_team_elo_for_league(db, league_id, season_year, extra_league_ids=companions)
@@ -314,6 +315,7 @@ async def activate_and_sync(
                 await compute_match_result_for_league(db, league_id, season_year)
                 await compute_value_bets_for_league(db, league_id, season_year)
                 await compute_team_profiles_for_league(db, league_id, season_year)
+                await compute_top_scorer_for_league(db, league_id, season_year)
 
             # Phase 4: If there are fixtures today → sync predictions, injuries, goal-probability
             _sync_status[league_id]["phase"] = "today_enrichment"

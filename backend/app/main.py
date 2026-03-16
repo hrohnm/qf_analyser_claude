@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -14,18 +15,49 @@ from app.api.teams import router as teams_router
 from app.api.betting_slips import router as betting_slips_router
 from app.api.admin import router as admin_router
 from app.sync.client import api_client
+from app.sync.jobs.sync_fixtures import sync_started_today_fixtures
+from app.sync.live_refresh_runtime import live_refresh_controller
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+logger = logging.getLogger(__name__)
+
+
+async def _live_fixture_refresh_loop() -> None:
+    while True:
+        state = await live_refresh_controller.wait_until_next_run()
+        try:
+            result = await sync_started_today_fixtures()
+            logger.info(
+                "[LiveFixtureRefresh] interval=%ss leagues=%s fixtures=%s",
+                state.interval_seconds,
+                result.get("leagues", 0),
+                result.get("fixtures", 0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("[LiveFixtureRefresh] periodic refresh failed")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
+    live_fixture_task: asyncio.Task | None = None
+    if settings.live_fixture_refresh_enabled:
+        live_fixture_task = asyncio.create_task(_live_fixture_refresh_loop())
+
     yield
     # Shutdown
+    if live_fixture_task is not None:
+        live_fixture_task.cancel()
+        try:
+            await live_fixture_task
+        except asyncio.CancelledError:
+            pass
     await api_client.close()
 
 

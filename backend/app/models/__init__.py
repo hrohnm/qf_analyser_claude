@@ -23,6 +23,7 @@ from app.models.fixture_pattern_evaluation import FixturePatternEvaluation
 from app.models.team_season_profile import TeamSeasonProfile
 from app.models.fixture_gpt_analysis import FixtureGptAnalysis
 from app.models.placed_bet import PlacedBet
+from app.models.fixture_top_scorer_pattern import FixtureTopScorerPattern
 
 __all__ = [
     "League",
@@ -50,4 +51,5 @@ __all__ = [
     "TeamSeasonProfile",
     "FixtureGptAnalysis",
     "PlacedBet",
+    "FixtureTopScorerPattern",
 ]

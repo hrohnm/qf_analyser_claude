@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.models.day_betting_slip import DayBettingSlip
+from app.models.fixture import Fixture
 from app.models.placed_bet import PlacedBet
 from app.services.betting_slips_service import generate_betting_slips
 from app.services.pattern_slips_service import generate_pattern_slips, regenerate_single_slip
@@ -14,13 +15,57 @@ from app.services.slip_evaluation_service import evaluate_slips_for_date
 router = APIRouter(prefix="/betting-slips", tags=["Betting Slips"])
 
 
+async def _enrich_slips_with_fixture_state(db: AsyncSession, slips_payload: dict | list | None) -> dict | list | None:
+    if slips_payload is None:
+        return slips_payload
+
+    root = dict(slips_payload) if isinstance(slips_payload, dict) else {"slips": list(slips_payload)}
+    slips = list(root.get("slips", []))
+
+    fixture_ids: set[int] = set()
+    for slip in slips:
+        for pick in slip.get("picks", []):
+            fixture_id = pick.get("fixture_id")
+            if isinstance(fixture_id, int):
+                fixture_ids.add(fixture_id)
+
+    if not fixture_ids:
+        return root if isinstance(slips_payload, dict) else root["slips"]
+
+    fixtures = (
+        await db.execute(select(Fixture).where(Fixture.id.in_(fixture_ids)))
+    ).scalars().all()
+    fixture_map = {fixture.id: fixture for fixture in fixtures}
+
+    enriched_slips: list[dict] = []
+    for slip in slips:
+        enriched_picks: list[dict] = []
+        for pick in slip.get("picks", []):
+            updated_pick = dict(pick)
+            fixture_id = updated_pick.get("fixture_id")
+            fixture = fixture_map.get(fixture_id)
+            if fixture is not None:
+                updated_pick["fixture_status_short"] = fixture.status_short
+                updated_pick["fixture_home_score"] = fixture.home_score
+                updated_pick["fixture_away_score"] = fixture.away_score
+                updated_pick["fixture_home_ht_score"] = fixture.home_ht_score
+                updated_pick["fixture_away_ht_score"] = fixture.away_ht_score
+            enriched_picks.append(updated_pick)
+        enriched_slip = dict(slip)
+        enriched_slip["picks"] = enriched_picks
+        enriched_slips.append(enriched_slip)
+
+    root["slips"] = enriched_slips
+    return root if isinstance(slips_payload, dict) else root["slips"]
+
+
 @router.post("/generate")
 async def generate(
     slip_date: date | None = None,
     force: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    """Generiert 3 Wettscheine für den angegebenen Tag via Claude AI."""
+    """Generiert 2 Wettscheine fuer den angegebenen Tag via Claude AI."""
     try:
         return await generate_betting_slips(db, slip_date, force=force)
     except ValueError as e:
@@ -45,9 +90,10 @@ async def get_slips(
     )).scalar_one_or_none()
     if not row:
         return None
+    enriched_slips = await _enrich_slips_with_fixture_state(db, row.slips)
     return {
         "slip_date": row.slip_date.isoformat(),
-        "slips": row.slips,
+        "slips": enriched_slips,
         "model_version": row.model_version,
         "generated_at": row.generated_at.isoformat(),
         "cached": True,
@@ -61,7 +107,7 @@ async def generate_pattern(
     force: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    """Generiert 3 Pattern-basierte Wettscheine (kein KI) für den angegebenen Tag."""
+    """Generiert 2 Pattern-basierte Wettscheine (keine KI) fuer den angegebenen Tag."""
     try:
         return await generate_pattern_slips(db, slip_date, force=force)
     except ValueError as e:

@@ -194,6 +194,394 @@ function FormLogo({ teamId, teamName, score, trend }: {
   )
 }
 
+function compactTeamName(name: string) {
+  return name.split(' ')[0] || name
+}
+
+function deltaColor(delta: number | null) {
+  if (delta == null) return 'gray'
+  if (Math.abs(delta) < 0.01) return 'gray'
+  return delta > 0 ? 'blue' : 'teal'
+}
+
+function signalText(delta: number | null, positive: string, negative: string, neutral = 'ausgeglichen') {
+  if (delta == null || Math.abs(delta) < 0.01) return neutral
+  return delta > 0 ? positive : negative
+}
+
+function SignalRow({ label, value, tone = 'dimmed' }: {
+  label: string
+  value: string
+  tone?: string
+}) {
+  return (
+    <Group justify="space-between" gap="xs" wrap="nowrap">
+      <Text size="xs" c="dimmed">{label}</Text>
+      <Text size="xs" fw={600} c={tone} ta="right">{value}</Text>
+    </Group>
+  )
+}
+
+function topPatternOutcome(
+  mrp: FixtureDetails['match_result_probability'],
+  sl: FixtureDetails['scoreline_distribution'],
+  homeName: string,
+  awayName: string,
+) {
+  return [
+    { label: homeName, prob: mrp?.p_home_win ?? sl?.p_home_win ?? null, color: 'blue' },
+    { label: 'Remis', prob: mrp?.p_draw ?? sl?.p_draw ?? null, color: 'gray' },
+    { label: awayName, prob: mrp?.p_away_win ?? sl?.p_away_win ?? null, color: 'teal' },
+  ]
+    .filter((option): option is { label: string; prob: number; color: string } => option.prob != null)
+    .sort((a, b) => b.prob - a.prob)[0] ?? null
+}
+
+function topApiOutcome(
+  pred: FixtureDetails['prediction'],
+  homeName: string,
+  awayName: string,
+) {
+  return [
+    { label: homeName, prob: pred?.percent_home ?? null, color: 'blue' },
+    { label: 'Remis', prob: pred?.percent_draw ?? null, color: 'gray' },
+    { label: awayName, prob: pred?.percent_away ?? null, color: 'teal' },
+  ]
+    .filter((option): option is { label: string; prob: number; color: string } => option.prob != null)
+    .sort((a, b) => b.prob - a.prob)[0] ?? null
+}
+
+function OverviewTab({
+  data,
+  homeName,
+  awayName,
+  homeElo,
+  awayElo,
+  homeFormScore,
+  awayFormScore,
+}: {
+  data: FixtureDetails
+  homeName: string
+  awayName: string
+  homeElo: number | null
+  awayElo: number | null
+  homeFormScore: number | null
+  awayFormScore: number | null
+}) {
+  const { prediction: pred, match_result_probability: mrp, scoreline_distribution: sl, value_bets, h2h } = data
+  const p1 = mrp?.p_home_win ?? sl?.p_home_win ?? null
+  const pX = mrp?.p_draw ?? sl?.p_draw ?? null
+  const p2 = mrp?.p_away_win ?? sl?.p_away_win ?? null
+  const pBtts = mrp?.p_btts ?? sl?.p_btts ?? null
+  const pO25 = mrp?.p_over_25 ?? sl?.p_over_25 ?? null
+  const homeImpact = data.team_injury_impact_home ?? 0
+  const awayImpact = data.team_injury_impact_away ?? 0
+  const eloDelta = homeElo != null && awayElo != null ? homeElo - awayElo : null
+  const formDelta = homeFormScore != null && awayFormScore != null ? homeFormScore - awayFormScore : null
+  const injuryDelta = awayImpact - homeImpact
+
+  const outcomeOptions = [
+    { label: `Sieg ${compactTeamName(homeName)}`, prob: p1, tone: 'blue' },
+    { label: 'Unentschieden', prob: pX, tone: 'gray' },
+    { label: `Sieg ${compactTeamName(awayName)}`, prob: p2, tone: 'teal' },
+  ].filter((option): option is { label: string; prob: number; tone: string } => option.prob != null)
+
+  const topOutcome = outcomeOptions.length
+    ? outcomeOptions.reduce((best, current) => current.prob > best.prob ? current : best)
+    : null
+  const apiOutcome = topApiOutcome(pred, homeName, awayName)
+
+  const sortedValueBets = [...(value_bets ?? [])].sort((a, b) => b.edge - a.edge)
+  const topValueBet = sortedValueBets[0] ?? null
+
+  const coverage = [
+    { label: 'Prediction', ok: !!data.prediction },
+    { label: 'Pattern', ok: !!mrp || !!sl },
+    { label: 'Stats', ok: data.statistics.length > 0 },
+    { label: 'Events', ok: data.events.length > 0 },
+    { label: 'Injuries', ok: data.injuries.length > 0 },
+    { label: 'Value Bets', ok: !!value_bets?.length },
+  ]
+
+  return (
+    <Stack gap="sm">
+      <Grid gutter="sm">
+        <GridCol span={{ base: 12, lg: 5 }}>
+          <Card withBorder p="sm" h="100%">
+            <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Match Verdict</Text>
+            {topOutcome ? (
+              <Stack gap={8}>
+                <Badge size="xs" color="indigo" variant="light" w="fit-content">Quelle: Pattern-Modell</Badge>
+                <Group justify="space-between" align="flex-end" wrap="nowrap">
+                  <Stack gap={2}>
+                    <Text size="lg" fw={800}>{topOutcome.label}</Text>
+                    <Text size="xs" c="dimmed">
+                      {sl?.most_likely_score ? `Wahrscheinlichster Score: ${sl.most_likely_score}` : 'Keine Scoreline verfügbar'}
+                    </Text>
+                  </Stack>
+                  <Badge size="lg" color={topOutcome.tone} variant="light">
+                    {fmtPct(topOutcome.prob)}
+                  </Badge>
+                </Group>
+                {outcomeOptions.length > 0 && (
+                  <Progress.Root size={16} radius="xl">
+                    {p1 != null && (
+                      <Progress.Section value={p1 * 100} color="blue">
+                        <Progress.Label fz={10}>{fmtPct(p1)}</Progress.Label>
+                      </Progress.Section>
+                    )}
+                    {pX != null && (
+                      <Progress.Section value={pX * 100} color="gray">
+                        <Progress.Label fz={10}>{fmtPct(pX)}</Progress.Label>
+                      </Progress.Section>
+                    )}
+                    {p2 != null && (
+                      <Progress.Section value={p2 * 100} color="teal">
+                        <Progress.Label fz={10}>{fmtPct(p2)}</Progress.Label>
+                      </Progress.Section>
+                    )}
+                  </Progress.Root>
+                )}
+                <Group gap={6} wrap="wrap">
+                  {pBtts != null && (
+                    <Badge size="sm" color={pBtts >= 0.5 ? 'green' : 'gray'} variant="light">
+                      BTTS {fmtPct(pBtts)}
+                    </Badge>
+                  )}
+                  {pO25 != null && (
+                    <Badge size="sm" color={pO25 >= 0.5 ? 'indigo' : 'gray'} variant="light">
+                      Ü2,5 {fmtPct(pO25)}
+                    </Badge>
+                  )}
+                  {mrp?.confidence != null && (
+                    <Badge size="sm" color={mrp.confidence >= 0.65 ? 'green' : mrp.confidence >= 0.52 ? 'yellow' : 'orange'} variant="outline">
+                      Confidence {fmtPct(mrp.confidence)}
+                    </Badge>
+                  )}
+                </Group>
+              </Stack>
+            ) : (
+              <Text size="xs" c="dimmed">Noch keine belastbare Modell-Aussage verfügbar.</Text>
+            )}
+          </Card>
+        </GridCol>
+
+        <GridCol span={{ base: 12, lg: 4 }}>
+          <Card withBorder p="sm" h="100%">
+            <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Prognose-Quellen</Text>
+            <Stack gap="sm">
+              <Paper withBorder p="xs" radius="md">
+                <Group justify="space-between" align="flex-start" wrap="nowrap">
+                  <Stack gap={2}>
+                    <Badge size="xs" color="indigo" variant="light" w="fit-content">Pattern</Badge>
+                    <Text size="sm" fw={700}>
+                      {topOutcome ? `${topOutcome.label} · ${fmtPct(topOutcome.prob)}` : 'keine Pattern-Prognose'}
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      Eigenes Modell mit Elo, Form, Goal-Probabilities, Injury-Impact und Scoreline-Logik.
+                    </Text>
+                  </Stack>
+                </Group>
+              </Paper>
+              <Paper withBorder p="xs" radius="md">
+                <Group justify="space-between" align="flex-start" wrap="nowrap">
+                  <Stack gap={2}>
+                    <Badge size="xs" color="gray" variant="light" w="fit-content">API Prediction</Badge>
+                    <Text size="sm" fw={700}>
+                      {apiOutcome ? `${compactTeamName(apiOutcome.label)} · ${fmtPct(apiOutcome.prob, true)}` : 'keine API-Prediction'}
+                    </Text>
+                    <Text size="xs" c="dimmed">
+                      Externe Vorhersage aus API-Football. Kann bewusst von unserem Pattern-Modell abweichen.
+                    </Text>
+                  </Stack>
+                </Group>
+              </Paper>
+              {topOutcome && apiOutcome && (
+                <Text size="xs" c={compactTeamName(topOutcome.label) === compactTeamName(apiOutcome.label) ? 'green' : 'orange'}>
+                  {compactTeamName(topOutcome.label) === compactTeamName(apiOutcome.label)
+                    ? 'Beide Quellen zeigen in dieselbe Richtung.'
+                    : 'Pattern und API kommen hier zu unterschiedlichen Tendenzen.'}
+                </Text>
+              )}
+            </Stack>
+          </Card>
+        </GridCol>
+
+        <GridCol span={{ base: 12, lg: 3 }}>
+          <Card withBorder p="sm" h="100%">
+            <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Warum?</Text>
+            <Stack gap={6}>
+              <SignalRow
+                label="Elo-Differenz"
+                value={eloDelta == null ? 'n/v' : `${eloDelta > 0 ? '+' : ''}${fmtV(eloDelta, 0)} · ${signalText(eloDelta, compactTeamName(homeName), compactTeamName(awayName))}`}
+                tone={deltaColor(eloDelta)}
+              />
+              <SignalRow
+                label="Form-Differenz"
+                value={formDelta == null ? 'n/v' : `${formDelta > 0 ? '+' : ''}${fmtV(formDelta, 1)} · ${signalText(formDelta, compactTeamName(homeName), compactTeamName(awayName))}`}
+                tone={deltaColor(formDelta)}
+              />
+              <SignalRow
+                label="Injury Pressure"
+                value={`${compactTeamName(homeName)} ${fmtV(homeImpact, 2)} · ${compactTeamName(awayName)} ${fmtV(awayImpact, 2)}`}
+                tone={Math.abs(injuryDelta) > 0.2 ? deltaColor(injuryDelta) : 'dimmed'}
+              />
+              <SignalRow
+                label="H2H"
+                value={h2h ? `${h2h.matches_total} Spiele · ${fmtPct(h2h.home_win_pct)} / ${fmtPct(h2h.draw_pct)} / ${fmtPct(h2h.away_win_pct)}` : 'kein H2H'}
+              />
+              <SignalRow
+                label="Top Value"
+                value={topValueBet ? `${topValueBet.market_name} ${topValueBet.bet_value} · ${topValueBet.bookmaker_odd.toFixed(2)}` : 'keine Value Bets'}
+                tone={topValueBet ? 'green' : 'dimmed'}
+              />
+            </Stack>
+          </Card>
+        </GridCol>
+      </Grid>
+
+      <Grid gutter="sm">
+        <GridCol span={{ base: 12, lg: 7 }}>
+          <SchnellbewertungCard
+            data={data}
+            mrp={mrp}
+            sl={sl}
+            gph={data.goal_probability_home}
+          />
+        </GridCol>
+
+        <GridCol span={{ base: 12, lg: 5 }}>
+          <Card withBorder p="sm" h="100%">
+            <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Top Markets</Text>
+            {topValueBet || pBtts != null || pO25 != null ? (
+              <Stack gap={8}>
+                {topValueBet && (
+                  <Paper withBorder p="xs" radius="md">
+                    <Text size="xs" c="dimmed">Bestes Value Bet</Text>
+                    <Text size="sm" fw={700}>{topValueBet.market_name} · {topValueBet.bet_value}</Text>
+                    <Group gap={6} mt={4}>
+                      <Badge size="sm" color="green" variant="light">Quote {topValueBet.bookmaker_odd.toFixed(2)}</Badge>
+                      <Badge size="sm" color="indigo" variant="light">Fair {topValueBet.fair_odd.toFixed(2)}</Badge>
+                      <Badge size="sm" color="green" variant="outline">Edge {fmtPct(topValueBet.edge)}</Badge>
+                    </Group>
+                  </Paper>
+                )}
+                {pBtts != null && (
+                  <SignalRow
+                    label="Beide treffen"
+                    value={`${pBtts >= 0.5 ? 'Ja' : 'Nein'} · ${fmtPct(pBtts >= 0.5 ? pBtts : 1 - pBtts)}`}
+                    tone={pBtts >= 0.5 ? 'green' : 'dimmed'}
+                  />
+                )}
+                {pO25 != null && (
+                  <SignalRow
+                    label="Über 2,5 Tore"
+                    value={`${pO25 >= 0.5 ? 'Ja' : 'Nein'} · ${fmtPct(pO25 >= 0.5 ? pO25 : 1 - pO25)}`}
+                    tone={pO25 >= 0.5 ? 'indigo' : 'dimmed'}
+                  />
+                )}
+                {data.goal_probability_home && (
+                  <SignalRow
+                    label={`${compactTeamName(homeName)} trifft`}
+                    value={`≥1 Tor ${fmtPct(data.goal_probability_home.p_ge_1_goal)}`}
+                    tone="blue"
+                  />
+                )}
+                {data.goal_probability_away && (
+                  <SignalRow
+                    label={`${compactTeamName(awayName)} trifft`}
+                    value={`≥1 Tor ${fmtPct(data.goal_probability_away.p_ge_1_goal)}`}
+                    tone="teal"
+                  />
+                )}
+              </Stack>
+            ) : (
+              <Text size="xs" c="dimmed">Keine verwertbaren Markt-Signale vorhanden.</Text>
+            )}
+          </Card>
+        </GridCol>
+      </Grid>
+
+      <Grid gutter="sm">
+        <GridCol span={{ base: 12, md: 6 }}>
+          <Card withBorder p="sm" h="100%">
+            <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Datenlage</Text>
+            <Group gap={6} wrap="wrap">
+              {coverage.map(item => (
+                <Badge
+                  key={item.label}
+                  size="sm"
+                  color={item.ok ? 'green' : 'gray'}
+                  variant={item.ok ? 'light' : 'outline'}
+                >
+                  {item.label}
+                </Badge>
+              ))}
+            </Group>
+            <Divider my="sm" />
+            <Text size="xs" c="dimmed">
+              Pattern und API werden separat gezeigt. Der Overview fasst sie nebeneinander zusammen, ohne sie zu vermischen.
+            </Text>
+          </Card>
+        </GridCol>
+
+        <GridCol span={{ base: 12, md: 6 }}>
+          <TopScorerCard data={data} homeName={homeName} awayName={awayName} />
+        </GridCol>
+
+        <GridCol span={{ base: 12, md: 6 }}>
+          <Card withBorder p="sm" h="100%">
+            <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Verletzungen im Blick</Text>
+            <Stack gap={6}>
+              <SignalRow
+                label={compactTeamName(homeName)}
+                value={data.injuries.filter(i => i.team_id === data.fixture.home_team_id).length
+                  ? `${data.injuries.filter(i => i.team_id === data.fixture.home_team_id).length} Ausfälle · Impact ${fmtV(homeImpact, 2)}`
+                  : 'keine gemeldeten Ausfälle'}
+                tone={homeImpact > 1 ? 'red' : homeImpact > 0.4 ? 'yellow' : 'dimmed'}
+              />
+              <SignalRow
+                label={compactTeamName(awayName)}
+                value={data.injuries.filter(i => i.team_id === data.fixture.away_team_id).length
+                  ? `${data.injuries.filter(i => i.team_id === data.fixture.away_team_id).length} Ausfälle · Impact ${fmtV(awayImpact, 2)}`
+                  : 'keine gemeldeten Ausfälle'}
+                tone={awayImpact > 1 ? 'red' : awayImpact > 0.4 ? 'yellow' : 'dimmed'}
+              />
+            </Stack>
+          </Card>
+        </GridCol>
+
+        <GridCol span={{ base: 12, md: 6 }}>
+          <Card withBorder p="sm" h="100%">
+            <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>H2H Snapshot</Text>
+            {h2h ? (
+              <Stack gap={8}>
+                {h2h.is_low_sample && (
+                  <Alert color="yellow" p="xs">
+                    <Text size="xs">{h2h.sample_note ?? 'Kleine H2H-Stichprobe.'}</Text>
+                  </Alert>
+                )}
+                <Progress.Root size={12} radius="xl">
+                  <Progress.Section value={h2h.home_win_pct * 100} color="blue" />
+                  <Progress.Section value={h2h.draw_pct * 100} color="gray" />
+                  <Progress.Section value={h2h.away_win_pct * 100} color="teal" />
+                </Progress.Root>
+                <SignalRow label={compactTeamName(homeName)} value={`${h2h.home_wins} Siege`} tone="blue" />
+                <SignalRow label="Remis" value={`${h2h.draws}`} />
+                <SignalRow label={compactTeamName(awayName)} value={`${h2h.away_wins} Siege`} tone="teal" />
+                <SignalRow label="BTTS" value={fmtPct(h2h.btts_rate)} />
+                <SignalRow label="Ø Tore" value={fmtV(h2h.avg_total_goals)} />
+              </Stack>
+            ) : (
+              <Text size="xs" c="dimmed">Kein Head-to-Head verfügbar.</Text>
+            )}
+          </Card>
+        </GridCol>
+      </Grid>
+    </Stack>
+  )
+}
+
 // ─── Tab: Teamvergleich ───────────────────────────────────────────────────────
 
 const pg = (n: number | null | undefined, d: number | undefined) =>
@@ -296,6 +684,11 @@ function TeamVergleichTab({ homeId, awayId, hs, as_, h2h, homeName, awayName }: 
       {h2h && (
         <>
           <Divider label={`H2H · ${h2h.matches_total} Spiele`} labelPosition="center" my={2} />
+          {h2h.is_low_sample && (
+            <Alert color="yellow" p="xs">
+              <Text size="xs">{h2h.sample_note ?? 'Kleine H2H-Stichprobe.'}</Text>
+            </Alert>
+          )}
           <Grid gutter="xs" align="center">
             <GridCol span={3}>
               <Stack gap={0} align="center">
@@ -349,6 +742,8 @@ interface PredLine {
   value: string          // the prediction text
   prob: number           // probability of the predicted outcome (0-1)
   isJa: boolean          // true=Ja/positive, false=Nein/negative
+  confidence?: number
+  emitted?: boolean
 }
 
 function confColor(prob: number, isJa: boolean): string {
@@ -359,123 +754,164 @@ function confColor(prob: number, isJa: boolean): string {
   return 'orange' // borderline Ja — still orange but value text will say "Tendenz"
 }
 
-function SchnellbewertungCard({ mrp, sl, gph, gpa, homeName, awayName }: {
+function SchnellbewertungCard({ data, mrp, sl, gph }: {
+  data: FixtureDetails
   mrp: FixtureDetails['match_result_probability']
   sl:  FixtureDetails['scoreline_distribution']
   gph: FixtureDetails['goal_probability_home']
-  gpa: FixtureDetails['goal_probability_away']
-  homeName: string
-  awayName: string
 }) {
   if (!mrp && !sl && !gph) return null
 
-  // Prefer MRP, fall back to scoreline_distribution for probabilities
-  const p1   = mrp?.p_home_win ?? sl?.p_home_win ?? null
-  const pX   = mrp?.p_draw     ?? sl?.p_draw     ?? null
-  const p2   = mrp?.p_away_win ?? sl?.p_away_win ?? null
-  const pBtts = mrp?.p_btts ?? sl?.p_btts ?? null
-  const pO15  = mrp?.p_over_15 ?? sl?.p_over_15 ?? null
-  const pO25  = mrp?.p_over_25 ?? sl?.p_over_25 ?? null
+  const allSignals = Object.values(data.pattern_predictions ?? {}).filter((signal): signal is NonNullable<typeof signal> => !!signal)
+  if (!allSignals.length) return null
 
-  // Über 0,5: 1 - P(0 goals total) ≈ 1 - (1-p_ge1_home)*(1-p_ge1_away)
-  const pO05: number | null = (() => {
-    if (gph && gpa) return 1 - (1 - gph.p_ge_1_goal) * (1 - gpa.p_ge_1_goal)
-    if (sl) {
-      // Poisson: P(0) = e^-lambda
-      const ph0 = Math.exp(-sl.lambda_home)
-      const pa0 = Math.exp(-sl.lambda_away)
-      return 1 - ph0 * pa0
-    }
-    return null
-  })()
-
-  // Helper: binary market label with threshold + "Tendenz" zone
-  const binLine = (label: string, p: number, threshold = 0.50, tendenzZone = 0.57): PredLine => {
-    const ja = p >= threshold
-    const prob = ja ? p : 1 - p
-    // "Tendenz Ja" for barely-above-threshold predictions
-    const value = ja
-      ? (p < tendenzZone ? 'Tendenz Ja' : 'Ja')
-      : (1 - p < tendenzZone ? 'Tendenz Nein' : 'Nein')
-    return { label, value, prob, isJa: ja }
-  }
-
-  const lines: PredLine[] = []
-
-  // Ergebnis: no threshold — always show the most likely outcome.
-  // Probability shown is what the model assigns to that outcome.
-  if (p1 != null && pX != null && p2 != null) {
-    const probs = [p1, pX, p2]
-    const idx = probs.indexOf(Math.max(...probs))
-    const outcome = idx === 0
-      ? `Sieg ${homeName.split(' ')[0]}`
-      : idx === 1 ? 'Unentschieden'
-      : `Sieg ${awayName.split(' ')[0]}`
-    const score = sl?.most_likely_score ? ` (${sl.most_likely_score})` : ''
-    lines.push({ label: 'Ergebnis', value: outcome + score, prob: probs[idx], isJa: true })
-  }
-
-  // Doppelte Chance: always show best option — threshold irrelevant by construction.
-  if (p1 != null && pX != null && p2 != null) {
-    const dc = [{ key: '1X', p: p1 + pX }, { key: 'X2', p: pX + p2 }, { key: '12', p: p1 + p2 }]
-    const best = dc.reduce((a, b) => b.p > a.p ? b : a)
-    lines.push({ label: 'Doppelte Chance', value: best.key, prob: best.p, isJa: true })
-  }
-
-  // BTTS — threshold 50 %, "Tendenz" zone 50–57 %
-  if (pBtts != null) lines.push(binLine('Beide treffen (BTTS)', pBtts, 0.50, 0.57))
-
-  // Team trifft — threshold 50 %, rarely borderline for strong teams
-  if (gph) lines.push(binLine(`${homeName.split(' ')[0]} trifft`, gph.p_ge_1_goal, 0.50, 0.60))
-  if (gpa) lines.push(binLine(`${awayName.split(' ')[0]} trifft`, gpa.p_ge_1_goal, 0.50, 0.60))
-
-  // Über 0,5 — almost always > 90 %; threshold raised to 85 % so the bar
-  // actually carries information (a "Nein" here would be extraordinary).
-  if (pO05 != null) lines.push(binLine('Über 0,5', pO05, 0.85, 0.93))
-
-  // Über 1,5 — raise threshold slightly to 55 % to avoid noise
-  if (pO15 != null) lines.push(binLine('Über 1,5', pO15, 0.55, 0.65))
-
-  // Über 2,5 — classic 50 % swing market
-  if (pO25 != null) lines.push(binLine('Über 2,5', pO25, 0.50, 0.58))
+  const lines: PredLine[] = allSignals.map(signal => ({
+    label: signal.market,
+    value: signal.pick,
+    prob: signal.probability,
+    isJa: signal.pick === 'Ja' || signal.pick.startsWith('Sieg') || signal.pick === '1X' || signal.pick === 'X2' || signal.pick === '12' || signal.pick === 'Unentschieden',
+    confidence: signal.confidence,
+    emitted: signal.emitted,
+  }))
 
   if (!lines.length) return null
+  const confidentCount = lines.filter(line => line.emitted).length
 
   return (
     <Card withBorder p="sm">
       <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Pattern-Schnellbewertung</Text>
+      <Group justify="space-between" align="center" mb={8}>
+        <Text size="xs" c="dimmed">
+          Alle Pattern-Märkte werden angezeigt. Konfidente Vorhersagen sind als Picks markiert.
+        </Text>
+        <Badge size="sm" color={confidentCount > 0 ? 'green' : 'gray'} variant="light">
+          {confidentCount} Picks
+        </Badge>
+      </Group>
+      {!confidentCount && (
+        <Alert color="gray" p="xs" mb="sm">
+          <Text size="xs">Aktuell erreicht kein Markt die Confidence-Schwelle. Die Modell-Tendenzen bleiben zur Einordnung trotzdem sichtbar.</Text>
+        </Alert>
+      )}
       <Stack gap={5}>
-        {lines.map(({ label, value, prob, isJa }) => {
+        {lines.map(({ label, value, prob, isJa, confidence, emitted }) => {
           const color = confColor(prob, isJa)
           return (
             <Group key={label} gap={8} wrap="nowrap" align="center">
-              {/* Label */}
               <Text size="xs" c="dimmed" w={160} style={{ flexShrink: 0 }}>{label}</Text>
-              {/* Prediction badge */}
               <Badge
                 size="sm"
-                color={color}
-                variant={isJa ? 'filled' : 'light'}
+                color={emitted ? color : 'gray'}
+                variant={emitted ? (isJa ? 'filled' : 'light') : 'outline'}
                 w={120}
                 style={{ flexShrink: 0, textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
               >
                 {value}
               </Badge>
-              {/* Probability bar */}
               <Progress
                 value={prob * 100}
-                color={color}
+                color={emitted ? color : 'gray'}
                 size={6}
                 style={{ flex: 1 }}
               />
-              {/* % */}
-              <Text size="xs" c={color === 'gray' ? 'dimmed' : color} fw={600} w={36} ta="right" style={{ flexShrink: 0 }}>
+              <Text size="xs" c={!emitted || color === 'gray' ? 'dimmed' : color} fw={600} w={36} ta="right" style={{ flexShrink: 0 }}>
                 {(prob * 100).toFixed(0)} %
               </Text>
+              <Badge size="xs" color={emitted ? 'green' : 'gray'} variant={emitted ? 'light' : 'outline'} style={{ flexShrink: 0 }}>
+                {emitted ? 'Pick' : 'Beob.'}
+              </Badge>
+              {confidence != null && (
+                <Badge size="xs" color={confidence >= 0.72 ? 'green' : confidence >= 0.64 ? 'yellow' : 'orange'} variant="outline" style={{ flexShrink: 0 }}>
+                  Conf {(confidence * 100).toFixed(0)}%
+                </Badge>
+              )}
             </Group>
           )
         })}
       </Stack>
+    </Card>
+  )
+}
+
+function TopScorerCard({ data, homeName, awayName }: {
+  data: FixtureDetails
+  homeName: string
+  awayName: string
+}) {
+  const pattern = data.top_scorer_pattern
+  if (!pattern) return null
+
+  const top = pattern.top_scorer as {
+    player_name: string
+    team_id: number
+    anytime_probability: number
+    confidence: number
+    penalty_goals: number
+  } | null
+
+  const homeCandidates = (pattern.home_candidates ?? []) as Array<Record<string, unknown>>
+  const awayCandidates = (pattern.away_candidates ?? []) as Array<Record<string, unknown>>
+  const teamLabel = (teamId: number) => teamId === data.fixture.home_team_id ? compactTeamName(homeName) : compactTeamName(awayName)
+
+  const renderCandidate = (candidate: Record<string, unknown>, tone: string) => {
+    const name = typeof candidate.player_name === 'string' ? candidate.player_name : 'Unbekannt'
+    const probability = typeof candidate.anytime_probability === 'number' ? candidate.anytime_probability : null
+    const penaltyShare = typeof candidate.penalty_share === 'number' ? candidate.penalty_share : null
+    return (
+      <Group key={`${name}-${tone}`} justify="space-between" wrap="nowrap" gap={8}>
+        <Text size="xs" truncate>{name}</Text>
+        <Group gap={6} wrap="nowrap">
+          {penaltyShare != null && penaltyShare > 0.2 && (
+            <Badge size="xs" color="orange" variant="light">Pen</Badge>
+          )}
+          <Badge size="xs" color={tone} variant="light">
+            {probability == null ? '–' : fmtPct(probability)}
+          </Badge>
+        </Group>
+      </Group>
+    )
+  }
+
+  return (
+    <Card withBorder p="sm" h="100%">
+      <Text size="xs" fw={700} c="dimmed" mb={8} tt="uppercase" lts={0.5}>Torschützen-Pattern</Text>
+      {top ? (
+        <Stack gap={8}>
+          <Paper withBorder p="xs" radius="md">
+            <Group justify="space-between" align="flex-start" wrap="nowrap">
+              <Stack gap={2}>
+                <Badge size="xs" color="orange" variant="light" w="fit-content">Top-Pick</Badge>
+                <Text size="sm" fw={700}>{top.player_name}</Text>
+                <Text size="xs" c="dimmed">{teamLabel(top.team_id)} · {top.penalty_goals > 0 ? `${top.penalty_goals} Elfmetertor(e) historisch` : 'kein klarer Penalty-Fokus'}</Text>
+              </Stack>
+              <Stack gap={4} align="flex-end">
+                <Badge size="sm" color="orange" variant="filled">{fmtPct(top.anytime_probability)}</Badge>
+                <Badge size="xs" color={top.confidence >= 0.72 ? 'green' : 'yellow'} variant="outline">
+                  Conf {fmtPct(top.confidence)}
+                </Badge>
+              </Stack>
+            </Group>
+          </Paper>
+          <Grid gutter="sm">
+            <GridCol span={6}>
+              <Stack gap={6}>
+                <Text size="xs" c="dimmed">{compactTeamName(homeName)} Kandidaten</Text>
+                {homeCandidates.length ? homeCandidates.slice(0, 3).map(c => renderCandidate(c, 'blue')) : <Text size="xs" c="dimmed">Keine Kandidaten.</Text>}
+                <Text size="xs" c="dimmed">Elfmeter pro Spiel: {pattern.home_penalties_per_match == null ? '–' : fmtV(pattern.home_penalties_per_match, 2)}</Text>
+              </Stack>
+            </GridCol>
+            <GridCol span={6}>
+              <Stack gap={6}>
+                <Text size="xs" c="dimmed">{compactTeamName(awayName)} Kandidaten</Text>
+                {awayCandidates.length ? awayCandidates.slice(0, 3).map(c => renderCandidate(c, 'teal')) : <Text size="xs" c="dimmed">Keine Kandidaten.</Text>}
+                <Text size="xs" c="dimmed">Elfmeter pro Spiel: {pattern.away_penalties_per_match == null ? '–' : fmtV(pattern.away_penalties_per_match, 2)}</Text>
+              </Stack>
+            </GridCol>
+          </Grid>
+        </Stack>
+      ) : (
+        <Text size="xs" c="dimmed">Noch kein Torschützen-Muster für dieses Spiel verfügbar.</Text>
+      )}
     </Card>
   )
 }
@@ -494,15 +930,18 @@ function PrognoseTab({ data, homeName, awayName }: {
   return (
     <Stack gap="sm">
       {/* Schnellbewertung */}
-      <SchnellbewertungCard mrp={mrp} sl={sl} gph={gph} gpa={gpa} homeName={homeName} awayName={awayName} />
+      <SchnellbewertungCard data={data} mrp={mrp} sl={sl} gph={gph} />
 
       {/* API-Football vs Pattern side by side */}
       <Grid gutter="sm">
         <GridCol span={{ base: 12, md: 6 }}>
           <Card withBorder p="sm" h="100%">
-            <Group gap={6} mb={8}>
+            <Group gap={6} mb={4}>
               <Badge size="xs" color="gray" variant="light">API-Football</Badge>
             </Group>
+            <Text size="xs" c="dimmed" mb="sm">
+              Externe Prediction-Quelle. Diese Werte sind bewusst getrennt von unserem Pattern-Modell.
+            </Text>
             {!pred
               ? <Text size="xs" c="dimmed">Keine Prediction.</Text>
               : <Stack gap={6}>
@@ -539,10 +978,13 @@ function PrognoseTab({ data, homeName, awayName }: {
 
         <GridCol span={{ base: 12, md: 6 }}>
           <Card withBorder p="sm" h="100%">
-            <Group gap={6} mb={8}>
+            <Group gap={6} mb={4}>
               <Badge size="xs" color="indigo" variant="light">Pattern-Modell</Badge>
               {mrp && <Badge size="xs" color="gray" variant="outline">Conf. {fmtPct(mrp.confidence)}</Badge>}
             </Group>
+            <Text size="xs" c="dimmed" mb="sm">
+              Eigenes Modell auf Basis unserer Pattern-Logik, Elo-, Form-, Goal-Probability- und Injury-Signale.
+            </Text>
             {!mrp && !sl && !gph
               ? <Text size="xs" c="dimmed">Keine Pattern-Vorhersage.</Text>
               : <Stack gap={6}>
@@ -1073,6 +1515,13 @@ export function MatchDetailsPage() {
   const rankByTeam = Object.fromEntries(leagueEloRows.map(r => [r.team_id, r.rank])) as Record<number, number>
   const isFinished = ['FT', 'AET', 'PEN'].includes(fixture.status_short ?? '')
   const hasMatchData = data.statistics.length > 0 || data.events.length > 0
+  const mrp = data.match_result_probability
+  const sl = data.scoreline_distribution
+  const topOutcome = topPatternOutcome(mrp, sl, home, away)
+  const apiOutcome = topApiOutcome(data.prediction, home, away)
+  const topValueBet = [...(data.value_bets ?? [])].sort((a, b) => b.edge - a.edge)[0] ?? null
+  const homeInjuryCount = data.injuries.filter(i => i.team_id === fixture.home_team_id).length
+  const awayInjuryCount = data.injuries.filter(i => i.team_id === fixture.away_team_id).length
 
   return (
     <Stack gap="sm">
@@ -1098,65 +1547,130 @@ export function MatchDetailsPage() {
 
       {/* Team card */}
       <Card withBorder p="sm">
-        <Group justify="space-between" align="center" wrap="nowrap" gap="xs">
-          <Stack gap={3} align="center" style={{ flex: 1 }}>
-            <FormLogo teamId={fixture.home_team_id} teamName={home}
-              score={homeScopeForm?.form_score ?? null} trend={homeScopeForm?.form_trend ?? null} />
-            <Text fw={700} ta="center" size="sm" style={{ cursor: 'pointer' }}
-              onClick={() => navigate(`/team/${fixture.home_team_id}?season_year=${fixture.season_year}&league_id=${fixture.league_id}`)}>
-              {home}
-            </Text>
-            <Group gap={4} justify="center" wrap="nowrap">
-              <Badge size="xs" variant="light" color="indigo">Elo {homeElo?.elo_overall.toFixed(0) ?? '–'}</Badge>
-              {homeElo?.strength_tier && <Badge size="xs" color="gray" variant="outline">{homeElo.strength_tier}</Badge>}
+        <Stack gap="md">
+          <Group justify="space-between" align="center" wrap="wrap" gap="xs">
+            <Group gap={8} wrap="wrap">
+              <Badge color="blue" variant="dot" size="sm">{STATUS_LABELS[fixture.status_short ?? ''] ?? fixture.status_short ?? '–'}</Badge>
+              {topOutcome && (
+                <Badge color={topOutcome.color} variant="light" size="sm">
+                  Pattern {compactTeamName(topOutcome.label)} {fmtPct(topOutcome.prob)}
+                </Badge>
+              )}
+              {apiOutcome && (
+                <Badge color={apiOutcome.color} variant="outline" size="sm">
+                  API {compactTeamName(apiOutcome.label)} {fmtPct(apiOutcome.prob, true)}
+                </Badge>
+              )}
+              {mrp?.confidence != null && (
+                <Badge color={mrp.confidence >= 0.65 ? 'green' : mrp.confidence >= 0.52 ? 'yellow' : 'orange'} variant="outline" size="sm">
+                  Confidence {fmtPct(mrp.confidence)}
+                </Badge>
+              )}
+              {topValueBet && (
+                <Badge color="green" variant="outline" size="sm">
+                  Top Value {topValueBet.market_name} {topValueBet.bet_value}
+                </Badge>
+              )}
             </Group>
-            <FormPills matches={hs?.last_matches} ownElo={homeElo?.elo_overall} eloByTeam={eloByTeam} rankByTeam={rankByTeam} />
-          </Stack>
-
-          <Stack align="center" gap={2} px="xs">
-            <Text fw={900} fz={28} lh={1}>{fixture.home_score ?? '–'} : {fixture.away_score ?? '–'}</Text>
-            {fixture.home_ht_score != null && (
-              <Text size="xs" c="dimmed">HZ {fixture.home_ht_score}:{fixture.away_ht_score}</Text>
-            )}
-          </Stack>
-
-          <Stack gap={3} align="center" style={{ flex: 1 }}>
-            <FormLogo teamId={fixture.away_team_id} teamName={away}
-              score={awayScopeForm?.form_score ?? null} trend={awayScopeForm?.form_trend ?? null} />
-            <Text fw={700} ta="center" size="sm" style={{ cursor: 'pointer' }}
-              onClick={() => navigate(`/team/${fixture.away_team_id}?season_year=${fixture.season_year}&league_id=${fixture.league_id}`)}>
-              {away}
-            </Text>
-            <Group gap={4} justify="center" wrap="nowrap">
-              <Badge size="xs" variant="light" color="indigo">Elo {awayElo?.elo_overall.toFixed(0) ?? '–'}</Badge>
-              {awayElo?.strength_tier && <Badge size="xs" color="gray" variant="outline">{awayElo.strength_tier}</Badge>}
+            <Group gap={8} wrap="wrap">
+              {data.goal_probability_home && (
+                <Badge variant="light" color="blue" size="sm">{compactTeamName(home)} Tor {fmtPct(data.goal_probability_home.p_ge_1_goal)}</Badge>
+              )}
+              {data.goal_probability_away && (
+                <Badge variant="light" color="teal" size="sm">{compactTeamName(away)} Tor {fmtPct(data.goal_probability_away.p_ge_1_goal)}</Badge>
+              )}
             </Group>
-            <FormPills matches={as_?.last_matches} ownElo={awayElo?.elo_overall} eloByTeam={eloByTeam} rankByTeam={rankByTeam} />
-          </Stack>
-        </Group>
+          </Group>
+
+          <Grid gutter="md" align="center">
+            <GridCol span={{ base: 12, md: 4 }}>
+              <Stack gap={3} align="center">
+                <FormLogo teamId={fixture.home_team_id} teamName={home}
+                  score={homeScopeForm?.form_score ?? null} trend={homeScopeForm?.form_trend ?? null} />
+                <Text fw={700} ta="center" size="md" style={{ cursor: 'pointer' }}
+                  onClick={() => navigate(`/team/${fixture.home_team_id}?season_year=${fixture.season_year}&league_id=${fixture.league_id}`)}>
+                  {home}
+                </Text>
+                <Group gap={4} justify="center" wrap="wrap">
+                  <Badge size="xs" variant="light" color="indigo">Elo {homeElo?.elo_overall.toFixed(0) ?? '–'}</Badge>
+                  {homeElo?.strength_tier && <Badge size="xs" color="gray" variant="outline">{homeElo.strength_tier}</Badge>}
+                  {homeInjuryCount > 0 && <Badge size="xs" color="red" variant="outline">{homeInjuryCount} Ausfall{homeInjuryCount > 1 ? 'e' : ''}</Badge>}
+                </Group>
+                <FormPills matches={hs?.last_matches} ownElo={homeElo?.elo_overall} eloByTeam={eloByTeam} rankByTeam={rankByTeam} />
+              </Stack>
+            </GridCol>
+
+            <GridCol span={{ base: 12, md: 4 }}>
+              <Stack align="center" gap={4}>
+                <Text fw={900} fz={34} lh={1}>{fixture.home_score ?? '–'} : {fixture.away_score ?? '–'}</Text>
+                {fixture.home_ht_score != null && (
+                  <Text size="xs" c="dimmed">HZ {fixture.home_ht_score}:{fixture.away_ht_score}</Text>
+                )}
+                <Text size="sm" fw={600}>
+                  {fixture.kickoff_utc ? dayjs(fixture.kickoff_utc + 'Z').format('DD.MM. HH:mm') : '–'} Uhr
+                </Text>
+                <Group gap={6} wrap="wrap" justify="center">
+                  <Badge size="xs" variant="light">Spieltag {fixture.matchday ?? '–'}</Badge>
+                  {fixture.venue_name && <Badge size="xs" variant="outline">{fixture.venue_name}</Badge>}
+                  {sl?.most_likely_score && <Badge size="xs" variant="outline" color="gray">Likely {sl.most_likely_score}</Badge>}
+                </Group>
+              </Stack>
+            </GridCol>
+
+            <GridCol span={{ base: 12, md: 4 }}>
+              <Stack gap={3} align="center">
+                <FormLogo teamId={fixture.away_team_id} teamName={away}
+                  score={awayScopeForm?.form_score ?? null} trend={awayScopeForm?.form_trend ?? null} />
+                <Text fw={700} ta="center" size="md" style={{ cursor: 'pointer' }}
+                  onClick={() => navigate(`/team/${fixture.away_team_id}?season_year=${fixture.season_year}&league_id=${fixture.league_id}`)}>
+                  {away}
+                </Text>
+                <Group gap={4} justify="center" wrap="wrap">
+                  <Badge size="xs" variant="light" color="indigo">Elo {awayElo?.elo_overall.toFixed(0) ?? '–'}</Badge>
+                  {awayElo?.strength_tier && <Badge size="xs" color="gray" variant="outline">{awayElo.strength_tier}</Badge>}
+                  {awayInjuryCount > 0 && <Badge size="xs" color="red" variant="outline">{awayInjuryCount} Ausfall{awayInjuryCount > 1 ? 'e' : ''}</Badge>}
+                </Group>
+                <FormPills matches={as_?.last_matches} ownElo={awayElo?.elo_overall} eloByTeam={eloByTeam} rankByTeam={rankByTeam} />
+              </Stack>
+            </GridCol>
+          </Grid>
+        </Stack>
       </Card>
 
       {/* Tabs */}
-      <Tabs defaultValue="vergleich" keepMounted={false}>
+      <Tabs defaultValue="uebersicht" keepMounted={false}>
         <Tabs.List>
-          <Tabs.Tab value="vergleich">Vergleich</Tabs.Tab>
-          <Tabs.Tab value="prognose">Prognose</Tabs.Tab>
+          <Tabs.Tab value="uebersicht">Übersicht</Tabs.Tab>
+          <Tabs.Tab value="modell">Modell</Tabs.Tab>
+          <Tabs.Tab value="teams">Teams</Tabs.Tab>
           <Tabs.Tab value="verletzungen">
             Verletzungen
             {data.injuries.length > 0 && (
               <Badge size="xs" color="red" variant="filled" ml={4}>{data.injuries.length}</Badge>
             )}
           </Tabs.Tab>
-          {(isFinished || hasMatchData) && <Tabs.Tab value="spieldaten">Spieldaten</Tabs.Tab>}
+          {(isFinished || hasMatchData) && <Tabs.Tab value="spieldaten">Match Data</Tabs.Tab>}
           <Tabs.Tab value="ki-analyse" leftSection={<IconBrain size={14} />}>KI Analyse</Tabs.Tab>
         </Tabs.List>
 
-        <Tabs.Panel value="vergleich" pt="sm">
+        <Tabs.Panel value="uebersicht" pt="sm">
+          <OverviewTab
+            data={data}
+            homeName={home}
+            awayName={away}
+            homeElo={homeElo?.elo_overall ?? null}
+            awayElo={awayElo?.elo_overall ?? null}
+            homeFormScore={homeScopeForm?.form_score ?? null}
+            awayFormScore={awayScopeForm?.form_score ?? null}
+          />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="teams" pt="sm">
           <TeamVergleichTab homeId={fixture.home_team_id} awayId={fixture.away_team_id}
             hs={hs} as_={as_} h2h={data.h2h ?? null} homeName={home} awayName={away} />
         </Tabs.Panel>
 
-        <Tabs.Panel value="prognose" pt="sm">
+        <Tabs.Panel value="modell" pt="sm">
           <PrognoseTab data={data} homeName={home} awayName={away} />
         </Tabs.Panel>
 

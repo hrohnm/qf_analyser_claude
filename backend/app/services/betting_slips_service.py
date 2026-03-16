@@ -1,11 +1,8 @@
 """
-Generate 3 betting slips for all fixtures of a given day using Claude.
+Generate 2 betting slips for all fixtures of a given day using Claude.
 
-Each slip targets a combined odd of ~10 and may combine:
-- Single picks from different matches
-- Bet Builder: multiple markets from the SAME match (marked betbuilder=true)
-
-Claude also gets web search to look up current injuries/news before picking.
+Each slip must use legs with odds between 1.25 and 1.40 and target
+a combined odd of 10-12.
 """
 import json
 import logging
@@ -200,38 +197,21 @@ DATENFELDER (komprimiert):
 - inj_h/inj_a: Verletzungs-Impact-Summe (0=keine Ausfälle, >50=schwere Ausfälle)
 - odds: Betano-Quoten {1X2=[Home/Draw/Away], O/U=[Over2.5/Under2.5...], Dbl=[Home/Draw,Home/Away,Draw/Away], HG=[Over0.5,Over1.5...Heimteam-Tore], AG=[Over0.5,Over1.5...Auswärtsteam-Tore]}
 
-ERSTELLE EXAKT 3 WETTSCHEINE:
+ERSTELLE EXAKT 2 WETTSCHEINE.
 
-SCHEIN 1 – „DC + Trifft" (Doppelchance + Team erzielt mind. 1 Tor als Betbuilder):
-Kombiniere pro Spiel: Doppelchance (Dbl, bet_id=12) + Team trifft (HG/AG Over 0.5, bet_id=16/17).
-Betbuilder = 2 Picks aus DEMSELBEN Spiel (betbuilder=true beim 2. Pick).
-Wähle bis zu 10 Betbuilder-Paare aus verschiedenen Spielen. Mindestquote Gesamt: 8.
-Vermeide dabei Quoten unter 1,2.
+REGELN FUER BEIDE SCHEINE:
+- Jeder Pick muss eine Einzelquote zwischen 1.25 und 1.40 haben.
+- Betbuilder sind erlaubt, aber nur wenn die ausgegebene Leg-Quote ebenfalls zwischen 1.25 und 1.40 liegt.
+- Die Gesamtquote jedes Scheins muss EXAKT im Bereich 10.00 bis 12.00 liegen.
+- Egal welche Picks: Marktwahl ist frei, solange die Quotenregel eingehalten wird.
+- Nutze bevorzugt viele solide Picks statt weniger riskanter Picks.
+- Vermeide Quoten ausserhalb des Bereichs kompromisslos.
 
-Betbuilder-Paar-Quote = DC_Quote × Over0.5_Quote × 0.87 (Korrelationsabschlag)
-Beispiel: DC 1.20 × Over 0.5 1.25 × 0.87 = 1.31 pro Paar
-
-Strategie: Viele sichere Paare können auch mit niedrigen Einzelquoten die Gesamtquote erreichen:
-- 6 Paare à 1.40: 1.40⁶ ≈ 7.5
-- 7 Paare à 1.35: 1.35⁷ ≈ 6.0
-- 8 Paare à 1.35: 1.35⁸ ≈ 8.1 ✓
-- 8 Paare à 1.40: 1.40⁸ ≈ 14.8 → zu hoch, auf 7 reduzieren
-Berechne EXAKT: Produkt aller Paar-Quoten (mit 0.87 Faktor). Ziel: 8-12.
-
-Nutze möglichst alle Spiele des Tages – pick die besten DC+Trifft Kombinationen unabhängig von der Favoritenrolle.
-
-SCHEIN 2 – „Siegerschein" (nur klare Favoriten-Siege):
-Ausschließlich bet_id=1 (1X2), bet_value="Home" oder "Away". KEIN Unentschieden, KEINE Doppelchance.
-Wähle 4-5 Spiele. Jede Einzelquote zwischen 1.40 und 2.20 (nicht zu sicher, nicht zu riskant).
-Zielkombination: 4 Picks à ~1.70 = 8.4, oder 5 Picks à ~1.50 = 7.6.
-
-SCHEIN 3 – „Freie Wahl" (kreative Kombination):
-Beliebige Märkte. Darf Betbuilder enthalten. Ziel: interessante, gut begründete Kombination.
-
-ZIELQUOTE: 9-12 pro Schein – PFLICHT. Berechne EXAKT vor dem Abschicken:
-- Schein 1: Produkt der Paar-Quoten (mit 0.87 Faktor)
-- Schein 2+3: Produkt der Einzelquoten
-Falls unter 9 → mehr/höhere Picks hinzufügen. Falls über 12 → niedrigere Picks wählen.
+PRAKTISCHE FOLGE:
+- Meist werden 7 bis 11 Picks pro Schein noetig sein.
+- Rechne die Gesamtquote vor dem Abschicken exakt nach.
+- Wenn ein Schein unter 10 liegt, fuege weitere Picks hinzu.
+- Wenn ein Schein ueber 12 liegt, ersetze Picks durch niedrigere Quoten.
 
 Antworte NUR mit validem JSON:
 
@@ -249,7 +229,7 @@ Antworte NUR mit validem JSON:
           "pick": "Home/Draw",
           "bet_id": 12,
           "bet_value": "Home/Draw",
-          "odd": 1.15,
+          "odd": 1.28,
           "betbuilder": false,
           "reasoning": "Kurz",
           "result": null
@@ -267,15 +247,63 @@ Antworte NUR mit validem JSON:
           "result": null
         }
       ]
+    },
+    {
+      "slip_nr": 2,
+      "combined_odd": 10.78,
+      "reasoning": "Kurze Begründung (max. 1 Satz)",
+      "picks": [
+        {
+          "fixture_id": 456,
+          "home": "C", "away": "D", "league": "Liga", "kickoff": "21:00",
+          "market": "Unter 4.5 Tore",
+          "pick": "Under 4.5",
+          "bet_id": 5,
+          "bet_value": "Under 4.5",
+          "odd": 1.32,
+          "betbuilder": false,
+          "reasoning": "Kurz",
+          "result": null
+        }
+      ]
     }
   ],
   "day_summary": "1-2 Sätze"
 }
 
-Regeln: bet_value EXAKT aus odds übernehmen. result=null. Kein Text außerhalb JSON."""
+Regeln: genau 2 Scheine. bet_value EXAKT aus odds übernehmen. result=null. Kein Text außerhalb JSON."""
 
 
 BETBUILDER_DISCOUNT = 0.87  # ~13% Abschlag für korrelierte Events (DC + Team trifft)
+
+
+def _validate_slip_shape(slips: list) -> None:
+    if len(slips) != 2:
+        raise ValueError(f"Es muessen genau 2 Wettscheine erzeugt werden, erhalten: {len(slips)}")
+
+    for idx, slip in enumerate(slips, start=1):
+        picks = slip.get("picks", [])
+        if not picks:
+            raise ValueError(f"Schein {idx} enthaelt keine Picks")
+
+        combined = slip.get("combined_odd")
+        try:
+            combined_val = float(combined)
+        except (TypeError, ValueError):
+            raise ValueError(f"Schein {idx} hat keine gueltige Gesamtquote")
+        if not (10.0 <= combined_val <= 12.0):
+            raise ValueError(f"Schein {idx} liegt mit Gesamtquote {combined_val:.2f} ausserhalb 10-12")
+
+        for pick_idx, pick in enumerate(picks, start=1):
+            odd = pick.get("odd")
+            try:
+                odd_val = float(odd)
+            except (TypeError, ValueError):
+                continue
+            if not (1.25 <= odd_val <= 1.40):
+                raise ValueError(
+                    f"Schein {idx}, Pick {pick_idx} hat Quote {odd_val:.2f} ausserhalb 1.25-1.40"
+                )
 
 
 def _validate_slip_odds(slips: list, all_fixture_odds: dict[int, dict[int, list]]) -> list:
@@ -330,6 +358,21 @@ def _validate_slip_odds(slips: list, all_fixture_odds: dict[int, dict[int, list]
     return slips
 
 
+def _collect_missing_odds(slips: list) -> list[dict]:
+    missing: list[dict] = []
+    for slip in slips:
+        for pick in slip.get("picks", []):
+            if pick.get("odd") is None:
+                missing.append({
+                    "slip_nr": slip.get("slip_nr"),
+                    "fixture_id": pick.get("fixture_id"),
+                    "market": pick.get("market"),
+                    "bet_id": pick.get("bet_id"),
+                    "bet_value": pick.get("bet_value"),
+                })
+    return missing
+
+
 async def generate_betting_slips(
     db: AsyncSession,
     target_date: date | None = None,
@@ -377,9 +420,10 @@ async def generate_betting_slips(
         all_fixture_odds[fix["id"]] = fix_odds
 
     user_message = (
-        f"Erstelle 3 Wettscheine (Zielquote ~10) für den Spieltag {target_date.strftime('%d.%m.%Y')}.\n\n"
+        f"Erstelle exakt 2 Wettscheine fuer den Spieltag {target_date.strftime('%d.%m.%Y')}.\n"
+        f"Jeder Pick muss Quote 1.25-1.40 haben und jeder Schein Gesamtquote 10-12.\n\n"
         f"SCHRITT 1: Recherchiere aktuelle Verletzungen, Sperren und Neuigkeiten für die interessantesten Spiele.\n\n"
-        f"SCHRITT 2: Erstelle die 3 Scheine basierend auf Recherche + folgenden Spieltagsdaten:\n\n"
+        f"SCHRITT 2: Erstelle die 2 Scheine basierend auf Recherche + folgenden Spieltagsdaten:\n\n"
         f"{json.dumps(fixtures_data, ensure_ascii=False, indent=2)}"
     )
 
@@ -429,7 +473,19 @@ async def generate_betting_slips(
     except json.JSONDecodeError as e:
         logger.error("JSON parse error. raw[:200]=%r error=%s", raw[:200], e)
         raise ValueError(f"Claude returned invalid JSON: {e}")
+    _validate_slip_shape(parsed.get("slips", []))
     slips = _validate_slip_odds(parsed.get("slips", []), all_fixture_odds)
+    _validate_slip_shape(slips)
+    missing_odds = _collect_missing_odds(slips)
+    if missing_odds:
+        sample = ", ".join(
+            f"S{m['slip_nr']} F{m['fixture_id']} {m['market']}={m['bet_value']}"
+            for m in missing_odds[:5]
+        )
+        raise ValueError(
+            f"KI-Wettscheine wurden nicht gespeichert: {len(missing_odds)} Picks ohne Betano-Quote. "
+            f"Beispiele: {sample}"
+        )
     day_summary = parsed.get("day_summary", "")
 
     # Store full result

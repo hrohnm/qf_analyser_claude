@@ -7,9 +7,9 @@ Fixtures are upserted (INSERT ... ON CONFLICT DO UPDATE) so re-runs are safe.
 import asyncio
 import re
 import logging
-from datetime import datetime
+from datetime import datetime, date
 
-from sqlalchemy import select
+from sqlalchemy import select, cast, Date as SADate
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +23,7 @@ from app.sync.leagues_config import LEAGUES
 logger = logging.getLogger(__name__)
 
 JOB_NAME = "sync_fixtures_current_season"
+LIVE_REFRESH_EXCLUDED_STATUSES = {"FT", "AET", "PEN", "CANC", "PST", "ABD", "AWD", "WO"}
 
 
 def _extract_matchday(round_str: str | None) -> int | None:
@@ -155,14 +156,56 @@ async def sync_league_fixtures(league_cfg: dict, season_year: int) -> dict:
     return {"league_id": league_id, "league_name": league_cfg["name"], "count": len(fixtures)}
 
 
+async def sync_league_fixtures_for_date(
+    league_cfg: dict,
+    target_date: date,
+    season_year: int,
+) -> dict:
+    """Fetch and store fixtures for one league/season limited to a single date."""
+    league_id = league_cfg["id"]
+    logger.info(f"Syncing fixtures for date {target_date}: {league_cfg['name']} {season_year}")
+
+    data = await api_client.get(
+        "/fixtures",
+        params={
+            "league": league_id,
+            "season": season_year,
+            "date": target_date.isoformat(),
+        },
+        job_name=JOB_NAME,
+    )
+
+    fixtures = data.get("response", [])
+    if not fixtures:
+        logger.info(f"No fixtures returned for league {league_id} on {target_date}")
+        return {"league_id": league_id, "league_name": league_cfg["name"], "count": 0}
+
+    async with AsyncSessionLocal() as db:
+        await _upsert_league(db, league_cfg, season_year)
+
+        teams_seen: set[int] = set()
+        for fix in fixtures:
+            for side in ("home", "away"):
+                team = fix["teams"][side]
+                if team["id"] not in teams_seen:
+                    await _upsert_team(db, team)
+                    teams_seen.add(team["id"])
+
+        for fix in fixtures:
+            await _upsert_fixture(db, fix, league_id, season_year)
+
+        await db.commit()
+
+    logger.info(f"  → {len(fixtures)} fixtures saved for {league_cfg['name']} on {target_date}")
+    return {"league_id": league_id, "league_name": league_cfg["name"], "count": len(fixtures)}
+
+
 async def sync_fixtures_for_date(target_date, season_year: int = 2025) -> list[dict]:
     """
     Sync fixtures only for leagues that have games on target_date.
     Used to refresh yesterday's results without a full 18-league sweep.
     Returns per-league result dicts (same shape as sync_all_fixtures).
     """
-    from sqlalchemy import cast, Date as SADate
-
     async with AsyncSessionLocal() as db:
         stmt = (
             select(Fixture.league_id)
@@ -176,8 +219,17 @@ async def sync_fixtures_for_date(target_date, season_year: int = 2025) -> list[d
         logger.info(f"No fixtures found for {target_date} in DB – nothing to refresh.")
         return []
 
-    league_map = {l["id"]: l for l in LEAGUES}
-    leagues_to_sync = [league_map[lid] for lid in league_ids if lid in league_map]
+    async with AsyncSessionLocal() as db:
+        leagues_result = await db.execute(select(League).where(League.id.in_(league_ids)))
+        leagues_to_sync = [
+            {
+                "id": league.id,
+                "name": league.name,
+                "country": league.country,
+                "tier": league.tier,
+            }
+            for league in leagues_result.scalars().all()
+        ]
 
     logger.info(
         f"Refreshing {len(leagues_to_sync)} leagues for date {target_date}: "
@@ -190,7 +242,7 @@ async def sync_fixtures_for_date(target_date, season_year: int = 2025) -> list[d
         async with db_semaphore:
             for attempt in range(1, 4):
                 try:
-                    return await sync_league_fixtures(league_cfg, season_year)
+                    return await sync_league_fixtures_for_date(league_cfg, target_date, season_year)
                 except Exception as exc:
                     if attempt < 3 and "deadlock" in str(exc).lower():
                         await asyncio.sleep(attempt * 2)
@@ -204,6 +256,97 @@ async def sync_fixtures_for_date(target_date, season_year: int = 2025) -> list[d
 
     results = await asyncio.gather(*[safe_sync(lc) for lc in leagues_to_sync])
     return list(results)
+
+
+async def sync_started_today_fixtures(
+    season_year: int = 2025,
+    now_utc: datetime | None = None,
+) -> dict:
+    """
+    Refresh fixtures for today's leagues that should already be underway.
+
+    Criteria:
+    - kickoff is today
+    - kickoff time is in the past
+    - fixture is not already in a terminal/non-playable status
+    """
+    now_utc = now_utc or datetime.utcnow()
+    today = now_utc.date()
+
+    async with AsyncSessionLocal() as db:
+        league_result = await db.execute(
+            select(Fixture.league_id)
+            .where(
+                Fixture.season_year == season_year,
+                cast(Fixture.kickoff_utc, SADate) == today,
+                Fixture.kickoff_utc <= now_utc,
+                Fixture.status_short.notin_(LIVE_REFRESH_EXCLUDED_STATUSES),
+            )
+            .distinct()
+        )
+        league_ids = [row[0] for row in league_result.all()]
+
+    if not league_ids:
+        logger.info("No started fixtures to refresh for today.")
+        return {
+            "leagues": 0,
+            "fixtures": 0,
+            "results": [],
+        }
+
+    async with AsyncSessionLocal() as db:
+        fixtures_result = await db.execute(
+            select(Fixture.id)
+            .where(
+                Fixture.season_year == season_year,
+                cast(Fixture.kickoff_utc, SADate) == today,
+                Fixture.kickoff_utc <= now_utc,
+                Fixture.status_short.notin_(LIVE_REFRESH_EXCLUDED_STATUSES),
+            )
+        )
+        fixture_ids = [row[0] for row in fixtures_result.all()]
+
+        leagues_result = await db.execute(select(League).where(League.id.in_(league_ids)))
+        leagues_to_sync = [
+            {
+                "id": league.id,
+                "name": league.name,
+                "country": league.country,
+                "tier": league.tier,
+            }
+            for league in leagues_result.scalars().all()
+        ]
+
+    logger.info(
+        "Refreshing live-window fixtures for today: %s leagues, %s fixtures",
+        len(leagues_to_sync),
+        len(fixture_ids),
+    )
+
+    db_semaphore = asyncio.Semaphore(6)
+
+    async def safe_sync(league_cfg: dict) -> dict:
+        async with db_semaphore:
+            for attempt in range(1, 4):
+                try:
+                    return await sync_league_fixtures_for_date(league_cfg, today, season_year)
+                except Exception as exc:
+                    if attempt < 3 and "deadlock" in str(exc).lower():
+                        await asyncio.sleep(attempt * 2)
+                        continue
+                    logger.error(f"Failed to refresh live fixtures for {league_cfg['name']}: {exc}")
+                    return {
+                        "league_id": league_cfg["id"],
+                        "league_name": league_cfg["name"],
+                        "error": str(exc),
+                    }
+
+    results = await asyncio.gather(*[safe_sync(lc) for lc in leagues_to_sync])
+    return {
+        "leagues": len(leagues_to_sync),
+        "fixtures": len(fixture_ids),
+        "results": list(results),
+    }
 
 
 async def sync_all_fixtures(season_year: int | None = None) -> list[dict]:

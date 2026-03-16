@@ -4,17 +4,55 @@ import dayjs from 'dayjs'
 import 'dayjs/locale/de'
 import type { EnrichedFixture, FixtureEvaluation } from '../../api'
 import type { Fixture } from '../../types'
-import { teamLogoUrl } from '../../types'
+import { leagueLogoUrl, teamLogoUrl } from '../../types'
 
 dayjs.locale('de')
 
 // ─── Grid column template ──────────────────────────────────────────────────
-// time | home | score-box | away | predictions (fixed width = sync across all rows)
+// league-logo | home | score-box | away | predictions (fixed width = sync across all rows)
 export const MATCH_ROW_GRID = '52px 1fr 72px 1fr 315px'
 
 interface Props {
   fixture: Fixture | EnrichedFixture
+  slipTips?: Array<{
+    source: 'ai' | 'pattern'
+    slipName: string
+    market: string
+    pick: string | null
+  }>
+  scoreChanged?: boolean
   onClick?: () => void
+}
+
+function SlipTipBadge({ tip }: {
+  tip: {
+    source: 'ai' | 'pattern'
+    slipName: string
+    market: string
+    pick: string | null
+  }
+}) {
+  const color = tip.source === 'pattern' ? 'orange' : 'violet'
+  const sourceLabel = tip.source === 'pattern' ? 'P' : 'KI'
+  return (
+    <Tooltip label={`${tip.slipName}: ${tip.market}${tip.pick ? ` · ${tip.pick}` : ''}`} withArrow fz="xs">
+      <Box style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: '1px 6px',
+        borderRadius: 4,
+        backgroundColor: `color-mix(in srgb, var(--mantine-color-${color}-6) 10%, transparent)`,
+        border: `1px solid color-mix(in srgb, var(--mantine-color-${color}-6) 28%, transparent)`,
+        maxWidth: 150,
+      }}>
+        <Text size="9px" fw={800} c={`${color}.7`} tt="uppercase">{sourceLabel}</Text>
+        <Text size="9px" c={`${color}.7`} truncate>
+          {tip.market}{tip.pick ? ` · ${tip.pick}` : ''}
+        </Text>
+      </Box>
+    </Tooltip>
+  )
 }
 
 function isEnriched(f: Fixture | EnrichedFixture): f is EnrichedFixture {
@@ -27,24 +65,34 @@ function fmtPct(v: number | null | undefined) {
 }
 
 // ─── Score box ─────────────────────────────────────────────────────────────
-function ScoreBox({ home, away, isLive, isFinished, kickoff, statusShort }: {
+function ScoreBox({ home, away, isLive, isFinished, kickoff, statusShort, elapsed, highlight }: {
   home: number | null
   away: number | null
   isLive: boolean
   isFinished: boolean
   kickoff: dayjs.Dayjs | null
   statusShort: string | null
+  elapsed?: number | null
+  highlight?: boolean
 }) {
   if (isLive) {
+    const liveLabel =
+      statusShort === 'HT'
+        ? 'HT'
+        : elapsed != null
+          ? `${elapsed}'`
+          : statusShort
     return (
       <Box style={{
         display: 'flex', flexDirection: 'column', alignItems: 'center',
-        background: 'linear-gradient(135deg, #e8590c 0%, #f76707 100%)',
+        background: highlight ? '#000000' : 'linear-gradient(135deg, #e8590c 0%, #f76707 100%)',
         borderRadius: 6, padding: '3px 10px', minWidth: 62,
+        boxShadow: highlight ? '0 0 0 3px color-mix(in srgb, black 45%, transparent)' : undefined,
+        transition: 'box-shadow 0.18s ease, background 0.18s ease',
       }}>
         <Text size="sm" fw={800} c="white" lh={1.2}>{home ?? '–'} : {away ?? '–'}</Text>
         <Text size="9px" c="rgba(255,255,255,0.85)" tt="uppercase" lh={1}>
-          {statusShort === 'HT' ? 'Halbzeit' : statusShort}
+          {liveLabel}
         </Text>
       </Box>
     )
@@ -146,7 +194,7 @@ function EvalBadges({ ev, htScore }: { ev: FixtureEvaluation; htScore: string | 
 }
 
 // ─── Main MatchRow ──────────────────────────────────────────────────────────
-export function MatchRow({ fixture, onClick }: Props) {
+export function MatchRow({ fixture, slipTips = [], scoreChanged = false, onClick }: Props) {
   const isFinished = ['FT', 'AET', 'PEN'].includes(fixture.status_short ?? '')
   const isLive = ['1H', 'HT', '2H'].includes(fixture.status_short ?? '')
   const kickoff = fixture.kickoff_utc ? dayjs(fixture.kickoff_utc + 'Z') : null
@@ -170,26 +218,15 @@ export function MatchRow({ fixture, onClick }: Props) {
       }}
       className="match-row"
     >
-      {/* ① Zeit / Live-Indikator */}
-      <Box>
-        {isLive ? (
-          <Box style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-            <Text size="xs" fw={700} c="orange.6" lh={1.2}>
-              {kickoff ? kickoff.format('HH:mm') : '––:––'}
-            </Text>
-            <Box style={{
-              display: 'inline-flex', alignItems: 'center',
-              backgroundColor: 'var(--mantine-color-orange-1)',
-              borderRadius: 3, padding: '0 4px',
-            }}>
-              <Text size="9px" fw={800} c="orange.7" tt="uppercase">Live</Text>
-            </Box>
-          </Box>
-        ) : (
-          <Text size="xs" c={isFinished ? 'dimmed' : 'var(--mantine-color-text)'} fw={isFinished ? 400 : 500}>
-            {kickoff ? kickoff.format('HH:mm') : '–'}
-          </Text>
-        )}
+      {/* ① Liga-Logo */}
+      <Box style={{ display: 'flex', justifyContent: 'center' }}>
+        <Image
+          src={leagueLogoUrl(fixture.league_id)}
+          w={24}
+          h={24}
+          fit="contain"
+          fallbackSrc="data:image/gif;base64,R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs="
+        />
       </Box>
 
       {/* ② Heim-Team (rechts ausgerichtet) */}
@@ -213,6 +250,8 @@ export function MatchRow({ fixture, onClick }: Props) {
           isFinished={isFinished}
           kickoff={kickoff}
           statusShort={fixture.status_short}
+          elapsed={fixture.elapsed}
+          highlight={scoreChanged}
         />
       </Box>
 
@@ -229,46 +268,59 @@ export function MatchRow({ fixture, onClick }: Props) {
       </Group>
 
       {/* ⑤ Vorhersagen */}
-      <Group gap={4} wrap="nowrap" pl={12} style={{ minWidth: 0 }}>
-        {hasProbs && !isFinished ? (
-          <>
-            <PredPill label="1" value={fmtPct(enriched!.p_home_win)} color="blue" />
-            <PredPill label="X" value={fmtPct(enriched!.p_draw)} color="gray" />
-            <PredPill label="2" value={fmtPct(enriched!.p_away_win)} color="teal" />
-            {hasGoals && (
-              <>
-                <Box style={{ width: 1, height: 28, backgroundColor: 'var(--mantine-color-default-border)', margin: '0 2px' }} />
-                <PredPill label="⚽H" value={fmtPct(enriched!.p_goal_home)} color="orange" />
-                <PredPill label="⚽A" value={fmtPct(enriched!.p_goal_away)} color="orange" />
-                {enriched!.p_over_15 != null && (
-                  <PredPill label="Ü1.5" value={fmtPct(enriched!.p_over_15)} color="cyan" />
-                )}
-                {enriched!.p_btts != null && (
-                  <PredPill label="BTTS" value={fmtPct(enriched!.p_btts)} color="violet" />
-                )}
-              </>
-            )}
-          </>
-        ) : isFinished && enriched?.evaluation ? (
-          <EvalBadges ev={enriched.evaluation} htScore={fixture.home_ht_score != null ? `HZ ${fixture.home_ht_score}:${fixture.away_ht_score}` : null} />
-        ) : isFinished ? (
-          <Text size="xs" c="dimmed" pl={4}>
-            {fixture.home_ht_score != null
-              ? `HZ ${fixture.home_ht_score}:${fixture.away_ht_score}`
-              : ''}
-          </Text>
-        ) : (
-          <Text size="xs" c="dimmed" pl={4}>Keine Daten</Text>
-        )}
+      <Box pl={12} style={{ minWidth: 0 }}>
+        <Group gap={4} wrap="nowrap" style={{ minWidth: 0 }}>
+          {hasProbs && !isFinished ? (
+            <>
+              <PredPill label="1" value={fmtPct(enriched!.p_home_win)} color="blue" />
+              <PredPill label="X" value={fmtPct(enriched!.p_draw)} color="gray" />
+              <PredPill label="2" value={fmtPct(enriched!.p_away_win)} color="teal" />
+              {hasGoals && (
+                <>
+                  <Box style={{ width: 1, height: 28, backgroundColor: 'var(--mantine-color-default-border)', margin: '0 2px' }} />
+                  <PredPill label="⚽H" value={fmtPct(enriched!.p_goal_home)} color="orange" />
+                  <PredPill label="⚽A" value={fmtPct(enriched!.p_goal_away)} color="orange" />
+                  {enriched!.p_over_15 != null && (
+                    <PredPill label="Ü1.5" value={fmtPct(enriched!.p_over_15)} color="cyan" />
+                  )}
+                  {enriched!.p_btts != null && (
+                    <PredPill label="BTTS" value={fmtPct(enriched!.p_btts)} color="violet" />
+                  )}
+                </>
+              )}
+            </>
+          ) : isFinished && enriched?.evaluation ? (
+            <EvalBadges ev={enriched.evaluation} htScore={fixture.home_ht_score != null ? `HZ ${fixture.home_ht_score}:${fixture.away_ht_score}` : null} />
+          ) : isFinished ? (
+            <Text size="xs" c="dimmed" pl={4}>
+              {fixture.home_ht_score != null
+                ? `HZ ${fixture.home_ht_score}:${fixture.away_ht_score}`
+                : ''}
+            </Text>
+          ) : (
+            <Text size="xs" c="dimmed" pl={4}>Keine Daten</Text>
+          )}
 
-        {enriched?.has_ai_picks && !isFinished && (
-          <Tooltip label="KI-Pick vorhanden" withArrow>
-            <Box ml={2}>
-              <IconRobot size={14} color="var(--mantine-color-violet-6)" />
-            </Box>
-          </Tooltip>
+          {enriched?.has_ai_picks && !isFinished && (
+            <Tooltip label="KI-Pick vorhanden" withArrow>
+              <Box ml={2}>
+                <IconRobot size={14} color="var(--mantine-color-violet-6)" />
+              </Box>
+            </Tooltip>
+          )}
+        </Group>
+
+        {slipTips.length > 0 && !isFinished && (
+          <Group gap={4} wrap="wrap" mt={4}>
+            {slipTips.slice(0, 3).map((tip, idx) => (
+              <SlipTipBadge key={`${tip.source}-${tip.slipName}-${tip.market}-${idx}`} tip={tip} />
+            ))}
+            {slipTips.length > 3 && (
+              <Text size="9px" c="dimmed">+{slipTips.length - 3}</Text>
+            )}
+          </Group>
         )}
-      </Group>
+      </Box>
     </Box>
   )
 }

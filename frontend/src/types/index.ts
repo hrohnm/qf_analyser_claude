@@ -23,6 +23,7 @@ export interface Fixture {
   round: string | null
   matchday: number | null
   status_short: string | null
+  elapsed: number | null
   home_score: number | null
   away_score: number | null
   home_ht_score: number | null
@@ -196,6 +197,8 @@ export interface FixtureDetails {
     btts_rate: number
     over_25_rate: number
     h2h_score: number
+    is_low_sample?: boolean
+    sample_note?: string | null
   } | null
   goal_timing_home: {
     games_played: number
@@ -259,6 +262,44 @@ export interface FixtureDetails {
     confidence: number
     elo_home_prob: number | null
     elo_away_prob: number | null
+  } | null
+  pattern_predictions: Record<string, {
+    market: string
+    pick: string
+    probability: number
+    raw_probability?: number
+    confidence: number
+    threshold?: number
+    margin?: number
+    emitted: boolean
+  } | null> | null
+  top_scorer_pattern: {
+    top_scorer: {
+      player_id: number | null
+      player_name: string
+      team_id: number
+      goals_total: number
+      penalty_goals: number
+      weighted_goal_share: number
+      weighted_non_penalty_share: number
+      penalty_share: number
+      team_penalties_per_match: number
+      expected_lambda: number
+      anytime_probability: number
+      confidence: number
+      last_goal_utc: string | null
+    } | null
+    home_candidates: Array<Record<string, unknown>> | null
+    away_candidates: Array<Record<string, unknown>> | null
+    home_penalties_per_match: number | null
+    away_penalties_per_match: number | null
+    home_penalty_conversion_share: number | null
+    away_penalty_conversion_share: number | null
+    model_confidence: number
+    sample_size_home: number
+    sample_size_away: number
+    model_version: string
+    computed_at: string | null
   } | null
   value_bets: Array<{
     market_name: string
