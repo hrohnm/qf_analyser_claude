@@ -106,7 +106,9 @@ function countryAbbr(country: string, league = ''): string {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function targetColor(combined: number) {
+function targetColor(combined: number, slipNr?: number) {
+  // Slip 7 "Favoriten Auswärts" hat absichtlich höhere Kombinationsquote
+  if (slipNr === 7) return combined >= 10 ? 'grape' : 'orange'
   if (combined >= 8 && combined <= 12) return 'green'
   if (combined >= 6 && combined < 8) return 'yellow'
   return 'red'
@@ -321,7 +323,9 @@ function SlipCard({
               {slipName}
             </Text>
             <Text size="xs" c="rgba(255,255,255,0.65)" lh={1.2}>
-              {gameGroups.length}-er Kombiwette · @ {combined.toFixed(2)}
+              {slip.slip_nr === 7
+                ? `${gameGroups.length} Siegerwetten · @ ${combined.toFixed(2)}`
+                : `${gameGroups.length}-er Kombiwette · @ ${combined.toFixed(2)}`}
             </Text>
           </Stack>
           <Group gap={6} style={{ flexShrink: 0 }}>
@@ -691,7 +695,7 @@ function HistoryTab() {
                         <Text size="xs" fw={500}>{slip.name}</Text>
                       </Table.Td>
                       <Table.Td style={{ textAlign: 'right' }}>
-                        <Badge size="xs" color={targetColor(slip.combined_odd)} variant="filled">
+                        <Badge size="xs" color={targetColor(slip.combined_odd, slip.slip_nr)} variant="filled">
                           {slip.combined_odd?.toFixed(2) ?? '–'}
                         </Badge>
                       </Table.Td>
@@ -732,7 +736,7 @@ function TodayTab() {
   const queryClient = useQueryClient()
   const today = dayjs().format('YYYY-MM-DD')
   const [source, setSource] = useState<'ai' | 'pattern'>('pattern')
-  const [strategy] = useLocalStorage<SlipStrategy[]>({ key: 'qf-strategy-v3', defaultValue: STRATEGY_DEFAULTS })
+  const [strategy] = useLocalStorage<SlipStrategy[]>({ key: 'qf-strategy-v5', defaultValue: STRATEGY_DEFAULTS })
 
   const { data: existing, isLoading } = useQuery({
     queryKey: ['betting-slips', today, source],
@@ -932,13 +936,11 @@ interface SlipStrategy {
   note?: string
 }
 
-// 30 € Tageseinsatz: 8+7+6+5+4 = 30 — nach Sicherheit gewichtet
+// 25 € Tageseinsatz bei 140 € Bankroll: 10+10+5
 const STRATEGY_DEFAULTS: SlipStrategy[] = [
-  { name: 'Verdoppler U4,5', wr_backtest: 0, ev_backtest: 0, kelly_q: 5.3, stake: 8,  active: true },
-  { name: 'Siegerschein',    wr_backtest: 0, ev_backtest: 0, kelly_q: 6.0, stake: 7,  active: true },
-  { name: 'DC Kombi',        wr_backtest: 0, ev_backtest: 0, kelly_q: 5.2, stake: 6,  active: true },
-  { name: 'DC + Trifft',     wr_backtest: 0, ev_backtest: 0, kelly_q: 3.5, stake: 5,  active: true },
-  { name: 'Tore Über 1,5',   wr_backtest: 0, ev_backtest: 0, kelly_q: 0,   stake: 4,  active: true },
+  { name: 'Kombi 1',              kelly_q: 4.3, stake: 10, active: true },
+  { name: 'Kombi 2',              kelly_q: 4.3, stake: 10, active: true },
+  { name: 'Favoriten Auswärts',   kelly_q: 2.1, stake: 5,  active: true },
 ]
 
 // ─── Strategie tab ────────────────────────────────────────────────────────────
@@ -947,9 +949,9 @@ function StrategieTab() {
   const queryClient = useQueryClient()
   const today = dayjs().format('YYYY-MM-DD')
 
-  const [bankroll, setBankroll] = useLocalStorage<number>({ key: 'qf-bankroll', defaultValue: 200 })
+  const [bankroll, setBankroll] = useLocalStorage<number>({ key: 'qf-bankroll-v2', defaultValue: 140 })
   const [strategy, setStrategy] = useLocalStorage<SlipStrategy[]>({
-    key: 'qf-strategy-v3',
+    key: 'qf-strategy-v5',
     defaultValue: STRATEGY_DEFAULTS,
   })
 

@@ -38,6 +38,12 @@ TARGET_LO, TARGET_HI = 10.0, 12.0
 PICK_ODD_LO, PICK_ODD_HI = 1.25, 1.40
 MIN_PICKS_PER_SLIP, MAX_PICKS_PER_SLIP = 7, 11
 
+# Slip 7 – Favoriten Auswärts
+WINNER_ODD_LO = 1.70      # minimale Betano-Quote
+WINNER_ODD_HI = 2.50      # maximale Betano-Quote (klarer Favorit, kein Außenseiter)
+WINNER_MIN_PROB = 0.42    # Modell muss klaren Favoriten erkennen
+WINNER_N_LO, WINNER_N_HI = 3, 4  # 3–4 Picks
+
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -771,6 +777,100 @@ def _build_slip6(fixtures: list[dict]) -> tuple[list[dict], float]:
     return picks, combined
 
 
+# ─── Slip 7: Favoriten Auswärts ─────────────────────────────────────────────
+
+def _build_slip7(
+    fixtures: list[dict],
+    odds_by_fixture: dict[int, dict[int, list]],
+) -> tuple[list[dict], float]:
+    """
+    3–4 Siegerwetten mit Betano-Quote ≥ 1.70.
+
+    Idee: Favoriten, die auswärts spielen, erzielen oft höhere Quoten als
+    erwartet. Modell-Edge > 0 bei Quote ≥ 1.70 ist das Kernkriterium.
+
+    Selektion:
+    - Betano Siegerwette (bet_id=1) ≥ 1.70
+    - Modell-Wahrscheinlichkeit ≥ 0.35
+    - Priorität: Auswärtsfavorit (p_away > p_home) → dann Edge absteigend
+    - Genau 3–4 Picks (ein Pick pro Spiel)
+    """
+    candidates: list[dict] = []
+
+    for fix in fixtures:
+        fixture_id = fix["fixture_id"]
+        p_h, p_a = fix["p_home"], fix["p_away"]
+
+        for prob, bet_value, pick_label in (
+            (p_a, "Away", "Auswärtssieg"),
+            (p_h, "Home", "Heimsieg"),
+        ):
+            odd = _find_market_odd(odds_by_fixture, fixture_id, 1, bet_value)
+            if odd is None or odd < WINNER_ODD_LO or odd > WINNER_ODD_HI:
+                continue
+            if prob < WINNER_MIN_PROB:
+                continue
+
+            edge = round(prob - (1.0 / odd), 4)
+            is_away_fav = (bet_value == "Away" and p_a >= p_h)
+
+            candidates.append({
+                "fixture_id": fixture_id,
+                "home": fix["home"],
+                "away": fix["away"],
+                "league": fix["league"],
+                "kickoff": fix["kickoff"],
+                "pick_label": pick_label,
+                "bet_value": bet_value,
+                "odd": odd,
+                "probability": prob,
+                "edge": edge,
+                "is_away_fav": is_away_fav,
+            })
+
+    if not candidates:
+        return [], 0.0
+
+    # Auswärtsfavoriten zuerst, dann Edge absteigend, dann Quote absteigend
+    candidates.sort(key=lambda c: (not c["is_away_fav"], -c["edge"], -c["odd"]))
+
+    # Ein Pick pro Fixture, bis zu 4 auswählen
+    selected: list[dict] = []
+    used_ids: set[int] = set()
+    for c in candidates:
+        if c["fixture_id"] in used_ids:
+            continue
+        selected.append(c)
+        used_ids.add(c["fixture_id"])
+        if len(selected) >= WINNER_N_HI:
+            break
+
+    if len(selected) < WINNER_N_LO:
+        return [], 0.0
+
+    combined = _combined([c["odd"] for c in selected])
+    picks: list[dict] = []
+    for c in selected:
+        away_tag = " (Auswärtsfavorit)" if c["is_away_fav"] else ""
+        picks.append({
+            "fixture_id": c["fixture_id"],
+            "home": c["home"],
+            "away": c["away"],
+            "league": c["league"],
+            "kickoff": c["kickoff"],
+            "market": "Siegerwette",
+            "pick": c["pick_label"],
+            "bet_id": 1,
+            "bet_value": c["bet_value"],
+            "odd": round(c["odd"], 2),
+            "betbuilder": False,
+            "reasoning": f"{c['pick_label']}{away_tag} ({c['probability']*100:.0f}% · Quote {c['odd']:.2f})",
+            "result": None,
+        })
+
+    return picks, combined
+
+
 # ─── Single-slip regeneration ────────────────────────────────────────────────
 
 _SLIP_BUILDERS = {
@@ -805,11 +905,15 @@ async def regenerate_single_slip(
         raise ValueError(f"Keine Spiele mit MRP-Daten am {target_date}")
 
     odds_by_fixture = await _load_betano_odds(db, [f["fixture_id"] for f in fixtures])
-    candidates = _collect_candidates(fixtures, odds_by_fixture)
-    if not candidates:
-        raise ValueError(
-            f"Keine passenden Kandidaten mit Betano-Quoten {PICK_ODD_LO:.2f}-{PICK_ODD_HI:.2f} am {target_date}"
-        )
+
+    # Slip 7 uses its own odds range (>= 1.70), skip the 1.25–1.40 candidate check
+    candidates: list[dict] = []
+    if slip_nr != 7:
+        candidates = _collect_candidates(fixtures, odds_by_fixture)
+        if not candidates:
+            raise ValueError(
+                f"Keine passenden Kandidaten mit Betano-Quoten {PICK_ODD_LO:.2f}-{PICK_ODD_HI:.2f} am {target_date}"
+            )
 
     excluded_ids: set[int] = set()
     if slip_nr == 2:
@@ -818,7 +922,10 @@ async def regenerate_single_slip(
         if first_slip:
             excluded_ids = {p.get("fixture_id") for p in first_slip.get("picks", []) if p.get("fixture_id")}
 
-    picks, combined = _build_slip_from_candidates(candidates, excluded_ids)
+    if slip_nr == 7:
+        picks, combined = _build_slip7(fixtures, odds_by_fixture)
+    else:
+        picks, combined = _build_slip_from_candidates(candidates, excluded_ids)
     name = SLIP_NAMES[slip_nr]
     n_games = len({p["fixture_id"] for p in picks if not p.get("betbuilder")})
     new_slip = {
@@ -877,6 +984,7 @@ async def regenerate_single_slip(
 SLIP_NAMES = {
     1: "Kombi 1",
     2: "Kombi 2",
+    7: "Favoriten Auswärts",
 }
 
 
@@ -930,6 +1038,8 @@ async def generate_pattern_slips(
             f"und Einzelquoten {PICK_ODD_LO:.2f}-{PICK_ODD_HI:.2f} erzeugt werden."
         )
 
+    picks7, odd7 = _build_slip7(fixtures, odds_by_fixture)
+
     def _slip(nr: int, picks: list[dict], combined: float) -> dict:
         name = SLIP_NAMES[nr]
         n_games = len({p["fixture_id"] for p in picks if not p.get("betbuilder")})
@@ -946,7 +1056,8 @@ async def generate_pattern_slips(
         s for s in [
             _slip(1, picks1, odd1),
             _slip(2, picks2, odd2),
-        ] if s["picks"]  # skip empty slips (slot 5 deaktiviert)
+            _slip(7, picks7, odd7) if picks7 else None,
+        ] if s is not None and s["picks"]
     ]
     slips, missing = _apply_betano_odds(slips, odds_by_fixture)
     if missing:
@@ -960,17 +1071,18 @@ async def generate_pattern_slips(
         )
     for slip in slips:
         suffix = ""
-        if build_mode == "unique_picks" and slip["slip_nr"] == 2:
-            suffix = " · alternative Picks bei engem Tagesmarkt"
-        elif build_mode == "best_effort" and slip["slip_nr"] == 2:
-            suffix = " · Best-Effort bei sehr engem Tagesmarkt"
+        if slip["slip_nr"] in (1, 2):
+            if build_mode == "unique_picks" and slip["slip_nr"] == 2:
+                suffix = " · alternative Picks bei engem Tagesmarkt"
+            elif build_mode == "best_effort" and slip["slip_nr"] == 2:
+                suffix = " · Best-Effort bei sehr engem Tagesmarkt"
         slip["reasoning"] = (
             f"{slip['name']} – {slip['n_games']} Spiele · Betano-Kombinationsquote {slip['combined_odd']:.2f}{suffix}"
         )
 
     day_summary = (
         f"Pattern-Scheine fuer {target_date.strftime('%d.%m.%Y')} aus {len(fixtures)} Spielen "
-        f"(MRP-Daten, keine KI). Ziel: 2 Scheine mit Einzelquoten {PICK_ODD_LO:.2f}-{PICK_ODD_HI:.2f}. Betano-Quoten: "
+        f"(MRP-Daten, keine KI). Betano-Quoten: "
         + " / ".join(f"Schein {s['slip_nr']} {s['combined_odd']:.2f}" for s in slips)
     )
 
