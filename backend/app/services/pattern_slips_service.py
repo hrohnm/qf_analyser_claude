@@ -35,7 +35,7 @@ BETBUILDER_DISCOUNT = 0.87
 BETANO_ID = 32
 
 TARGET_LO, TARGET_HI = 10.0, 12.0
-PICK_ODD_LO, PICK_ODD_HI = 1.25, 1.40
+PICK_ODD_LO, PICK_ODD_HI = 1.20, 1.40
 MIN_PICKS_PER_SLIP, MAX_PICKS_PER_SLIP = 7, 11
 
 # Slip 7 – Favoriten Auswärts
@@ -221,7 +221,7 @@ def _collect_candidates(
         for market, pick, bet_id, bet_value, probability in (
             ("Doppelchance", "1X", 12, "Home/Draw", fix["p_home"] + fix["p_draw"]),
             ("Doppelchance", "X2", 12, "Draw/Away", fix["p_draw"] + fix["p_away"]),
-            ("Doppelchance", "12", 12, "Home/Away", fix["p_home"] + fix["p_away"]),
+            # DC 12 (Home/Away) ausgeschlossen: Trefferquote nur 74% vs 85%/82% für 1X/X2
         ):
             odd = _find_market_odd(odds_by_fixture, fixture_id, bet_id, bet_value)
             if probability >= 0.72 and _in_pick_odd_range(odd):
@@ -259,32 +259,52 @@ def _collect_candidates(
     return candidates
 
 
+MIN_SLIP2_UNIQUE_FIXTURE_RATIO = 0.50  # Schein 2 muss min. 50% andere Fixtures haben
+
+
+def _slip_overlap(picks1: list[dict], picks2: list[dict]) -> float:
+    """Anteil gleicher fixture_ids zwischen zwei Scheinen (0.0 = komplett verschieden)."""
+    ids1 = {p["fixture_id"] for p in picks1}
+    ids2 = {p["fixture_id"] for p in picks2}
+    if not ids1 or not ids2:
+        return 1.0
+    return len(ids1 & ids2) / max(len(ids1), len(ids2))
+
+
 def _build_two_slips(candidates: list[dict]) -> tuple[tuple[list[dict], float], tuple[list[dict], float], str]:
     first_slip = _build_slip_from_candidates(candidates)
     picks1, _ = first_slip
     if not picks1:
         return first_slip, ([], 0.0), "none"
 
+    # 1. Beste Lösung: vollständig andere Fixtures
     used_fixture_ids = {p["fixture_id"] for p in picks1}
     second_slip = _build_slip_from_candidates(candidates, used_fixture_ids)
     if second_slip[0]:
         return first_slip, second_slip, "unique_fixtures"
 
-    # Fallback for sparse matchdays: avoid only identical picks, but allow
-    # different markets from already used fixtures.
+    # 2. Andere Picks (andere Märkte von bereits genutzten Fixtures erlaubt)
     used_pick_ids = {_pick_identity(p) for p in picks1}
     filtered_candidates = [c for c in candidates if _pick_identity(c) not in used_pick_ids]
     second_slip = _build_slip_from_candidates(filtered_candidates)
-    if second_slip[0]:
+    if second_slip[0] and _slip_overlap(picks1, second_slip[0]) <= (1.0 - MIN_SLIP2_UNIQUE_FIXTURE_RATIO):
         return first_slip, second_slip, "unique_picks"
 
-    # Final fallback: if the market is extremely thin, allow full reuse so we
-    # still get two slips instead of a hard failure.
-    second_slip = _build_slip_from_candidates(candidates)
-    if second_slip[0]:
-        return first_slip, second_slip, "best_effort"
+    # 3. Schrittweises Ausschließen der besten Picks von Schein 1, beginnend bei der Hälfte
+    start_skip = max(1, len(picks1) // 2)
+    for skip_count in range(start_skip, len(picks1) + 1):
+        excluded_picks = {_pick_identity(p) for p in picks1[:skip_count]}
+        fallback_candidates = [c for c in candidates if _pick_identity(c) not in excluded_picks]
+        second_slip = _build_slip_from_candidates(fallback_candidates)
+        if second_slip[0] and _slip_overlap(picks1, second_slip[0]) <= (1.0 - MIN_SLIP2_UNIQUE_FIXTURE_RATIO):
+            return first_slip, second_slip, "best_effort"
 
-    return first_slip, second_slip, "none"
+    # Kein ausreichend unterschiedlicher zweiter Schein gefunden → nur Schein 1
+    logger.warning(
+        "[PatternSlips] Zu wenig Kandidaten für zwei unterschiedliche Scheine (%d Kandidaten). "
+        "Schein 2 wird weggelassen.", len(candidates)
+    )
+    return first_slip, ([], 0.0), "thin_market"
 
 
 def _build_slip_from_candidates(
@@ -1031,12 +1051,26 @@ async def generate_pattern_slips(
             f"Keine Kandidaten mit Betano-Quoten zwischen {PICK_ODD_LO:.2f} und {PICK_ODD_HI:.2f} fuer {target_date} gefunden."
         )
 
-    (picks1, odd1), (picks2, odd2), build_mode = _build_two_slips(candidates)
-    if not picks1 or not picks2:
+    # Try to build structurally different slips by splitting markets:
+    # Kombi 1 = DC + Team trifft (sicherer, korrelierte Events)
+    # Kombi 2 = Siegerwette + Ü1.5 (direkter, verschiedene Signale)
+    cands_dc_scores = [c for c in candidates if c["bet_id"] in (12, 16, 17)]
+    cands_winner_over = [c for c in candidates if c["bet_id"] in (1, 5)]
+    picks1_split, odd1_split = _build_slip_from_candidates(cands_dc_scores) if cands_dc_scores else ([], 0.0)
+    picks2_split, odd2_split = _build_slip_from_candidates(cands_winner_over) if cands_winner_over else ([], 0.0)
+
+    if picks1_split and picks2_split:
+        picks1, odd1, picks2, odd2 = picks1_split, odd1_split, picks2_split, odd2_split
+        build_mode = "split_markets"
+    else:
+        (picks1, odd1), (picks2, odd2), build_mode = _build_two_slips(candidates)
+
+    if not picks1:
         raise ValueError(
-            f"Es konnten nicht zwei Scheine mit Gesamtquote {TARGET_LO:.0f}-{TARGET_HI:.0f} "
+            f"Es konnte kein Schein mit Gesamtquote {TARGET_LO:.0f}-{TARGET_HI:.0f} "
             f"und Einzelquoten {PICK_ODD_LO:.2f}-{PICK_ODD_HI:.2f} erzeugt werden."
         )
+    # picks2 kann leer sein bei dünnem Tagesmarkt (thin_market) – kein Fehler
 
     picks7, odd7 = _build_slip7(fixtures, odds_by_fixture)
 

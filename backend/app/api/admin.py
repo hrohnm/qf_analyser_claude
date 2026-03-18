@@ -2,7 +2,7 @@ from datetime import datetime, date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func, cast, Date
+from sqlalchemy import select, func, cast, Date, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db, AsyncSessionLocal
@@ -373,3 +373,49 @@ async def activate_and_sync(
 async def get_sync_status(league_id: int):
     """Aktueller Status des Hintergrund-Syncs für eine Liga."""
     return _sync_status.get(league_id, {"status": "idle"})
+
+
+@router.get("/stats/dc-accuracy")
+async def dc_accuracy_stats(
+    min_prob: float = 0.70,
+    db: AsyncSession = Depends(get_db),
+):
+    """Vergleich Trefferquote DC 1X vs X2 vs 12 aus fixture_pattern_evaluation."""
+    rows = (await db.execute(text("""
+        SELECT
+            dc_prediction,
+            COUNT(*)                                         AS total,
+            SUM(CASE WHEN dc_correct THEN 1 ELSE 0 END)     AS won,
+            ROUND(AVG(dc_prob::numeric) * 100, 1)           AS avg_prob_pct,
+            ROUND(AVG(CASE WHEN dc_correct THEN 1.0 ELSE 0.0 END) * 100, 1) AS hit_rate_pct,
+            -- Kalibrierung: wie weit liegt Trefferquote von avg_prob ab?
+            ROUND((AVG(CASE WHEN dc_correct THEN 1.0 ELSE 0.0 END)
+                   - AVG(dc_prob::numeric)) * 100, 1)       AS calibration_diff_pct
+        FROM fixture_pattern_evaluation
+        WHERE dc_prediction IS NOT NULL
+          AND dc_prob >= :min_prob
+        GROUP BY dc_prediction
+        ORDER BY dc_prediction
+    """), {"min_prob": min_prob})).fetchall()
+
+    total_row = (await db.execute(text("""
+        SELECT COUNT(*), SUM(CASE WHEN dc_correct THEN 1 ELSE 0 END)
+        FROM fixture_pattern_evaluation
+        WHERE dc_prediction IS NOT NULL AND dc_prob >= :min_prob
+    """), {"min_prob": min_prob})).fetchone()
+
+    return {
+        "min_prob_filter": min_prob,
+        "total_evaluated": total_row[0] if total_row else 0,
+        "breakdown": [
+            {
+                "dc_type":           r[0],
+                "total":             r[1],
+                "won":               r[2],
+                "avg_model_prob_pct": float(r[3]),
+                "hit_rate_pct":      float(r[4]),
+                "calibration_diff":  float(r[5]),
+            }
+            for r in rows
+        ],
+    }
