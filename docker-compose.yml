@@ -28,9 +28,7 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
-    volumes:
-      - ./backend:/app
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir /app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   frontend:
     build:
@@ -40,9 +38,6 @@ services:
       - backend
     ports:
       - "5173:5173"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
     environment:
       VITE_PROXY_TARGET: http://backend:8000
       CHOKIDAR_USEPOLLING: "true"
