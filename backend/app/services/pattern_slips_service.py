@@ -1161,20 +1161,25 @@ async def generate_custom_slip(
     min_picks: int = 3,
     max_picks: int = 10,
     pick_odd_lo: float = 1.20,
-    pick_odd_hi: float = 1.80,
+    pick_odd_hi: float = 1.60,
     name: str | None = None,
 ) -> dict:
     """
     Generiert einen einzelnen Wettschein aus den gewählten Ligen/Spielen
     und einer Zielquote. Keine KI, rein modellbasiert.
 
+    Unterstützt BetBuilder-Paare (DC + Team trifft, gleiches Spiel, 0.87-Rabatt).
+    Jedes Slot im DFS = eine Fixture (entweder ein Einzel-Pick oder ein BB-Paar).
+
     Parameter:
     - league_ids: Nur Spiele aus diesen Ligen berücksichtigen (leer = alle)
     - fixture_ids: Nur diese Spiele berücksichtigen (leer = alle aus league_ids)
-    - target_odd: Gewünschte Kombinationsquote (z.B. 5.0)
-    - min_picks / max_picks: Grenzen für die Anzahl der Picks
-    - pick_odd_lo / pick_odd_hi: Erlaubter Quoten-Bereich pro Pick
+    - target_odd: Gewünschte Kombinationsquote (z.B. 10.0)
+    - min_picks / max_picks: Grenzen für die Anzahl der Slots (Fixtures)
+    - pick_odd_lo / pick_odd_hi: Erlaubter Quoten-Bereich pro Einzel-Pick
     """
+    from math import log as _log
+
     fixtures = await _load_fixtures_with_probs(db, target_date, league_ids=league_ids)
 
     if fixture_ids:
@@ -1187,82 +1192,182 @@ async def generate_custom_slip(
     fids = [f["fixture_id"] for f in fixtures]
     odds_by_fixture = await _load_betano_odds(db, fids)
 
-    # Kandidaten sammeln — mit custom Quoten-Bereich
     def _in_range(odd: float | None) -> bool:
         return odd is not None and pick_odd_lo <= odd <= pick_odd_hi
 
-    candidates: list[dict] = []
+    # ── Einzelne Picks ────────────────────────────────────────────────────────
+    single_candidates: list[dict] = []
     for fix in fixtures:
         fixture_id = fix["fixture_id"]
 
-        for market, pick, bet_id, bet_value, probability in (
+        for market, pick_label, bet_id, bet_value, probability in (
             ("Doppelchance", "1X", 12, "Home/Draw", fix["p_home"] + fix["p_draw"]),
             ("Doppelchance", "X2", 12, "Draw/Away", fix["p_draw"] + fix["p_away"]),
         ):
             odd = _find_market_odd(odds_by_fixture, fixture_id, bet_id, bet_value)
             if probability >= 0.60 and _in_range(odd):
-                edge = round(probability - (1.0 / odd), 4)
-                candidates.append(_candidate_pick(fix, market, pick, bet_id, bet_value, odd, probability))
+                single_candidates.append(_candidate_pick(fix, market, pick_label, bet_id, bet_value, odd, probability))
 
         p15 = fix.get("p_over_15")
         odd_o15 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Over 1.5")
         if p15 is not None and p15 >= 0.60 and _in_range(odd_o15):
-            candidates.append(_candidate_pick(fix, "Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", odd_o15, p15))
+            single_candidates.append(_candidate_pick(fix, "Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", odd_o15, p15))
 
         p25 = fix.get("p_over_25")
         odd_o25 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Over 2.5")
         if p25 is not None and p25 >= 0.60 and _in_range(odd_o25):
-            candidates.append(_candidate_pick(fix, "Ueber 2,5 Tore", "Over 2.5", 5, "Over 2.5", odd_o25, p25))
+            single_candidates.append(_candidate_pick(fix, "Ueber 2,5 Tore", "Over 2.5", 5, "Over 2.5", odd_o25, p25))
 
         p45 = fix.get("p_under_45")
         odd_u45 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Under 4.5")
         if p45 is not None and p45 >= 0.60 and _in_range(odd_u45):
-            candidates.append(_candidate_pick(fix, "Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", odd_u45, p45))
+            single_candidates.append(_candidate_pick(fix, "Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", odd_u45, p45))
 
         ps_home = fix.get("p_home_scores")
         odd_home = _find_market_odd(odds_by_fixture, fixture_id, 16, "Over 0.5")
         if ps_home is not None and ps_home >= 0.60 and _in_range(odd_home):
-            candidates.append(_candidate_pick(fix, "Heimteam erzielt", "Over 0.5", 16, "Over 0.5", odd_home, ps_home))
+            single_candidates.append(_candidate_pick(fix, "Heimteam erzielt", "Over 0.5", 16, "Over 0.5", odd_home, ps_home))
 
         ps_away = fix.get("p_away_scores")
         odd_away = _find_market_odd(odds_by_fixture, fixture_id, 17, "Over 0.5")
         if ps_away is not None and ps_away >= 0.60 and _in_range(odd_away):
-            candidates.append(_candidate_pick(fix, "Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", odd_away, ps_away))
+            single_candidates.append(_candidate_pick(fix, "Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", odd_away, ps_away))
 
-        # Siegerwetten (home/away)
         for probability, bet_value, pick_label in (
             (fix["p_home"], "Home", "Heimsieg"),
             (fix["p_away"], "Away", "Auswaertssieg"),
         ):
             odd = _find_market_odd(odds_by_fixture, fixture_id, 1, bet_value)
             if probability >= 0.45 and _in_range(odd):
-                candidates.append(_candidate_pick(fix, "Siegerwette", pick_label, 1, bet_value, odd, probability))
+                single_candidates.append(_candidate_pick(fix, "Siegerwette", pick_label, 1, bet_value, odd, probability))
 
-    if not candidates:
+    # Duplikate entfernen
+    seen_keys: set[tuple] = set()
+    unique_singles: list[dict] = []
+    for c in single_candidates:
+        k = _pick_identity(c)
+        if k not in seen_keys:
+            seen_keys.add(k)
+            unique_singles.append(c)
+
+    # ── BetBuilder-Paare: beliebige 2 Märkte vom selben Spiel ────────────────
+    # Effektive Quote = odd1 * odd2 * 0.87
+    # Wir sammeln zuerst alle möglichen Einzel-Picks je Fixture mit einem
+    # weiteren Quoten-Fenster (1.10–4.0) und bilden dann alle Paare.
+    # Nur Paare, deren effektive Quote im Zielbereich liegt, werden genutzt.
+    BB_SINGLE_LO, BB_SINGLE_HI = 1.10, 4.0
+    bb_max_eff = pick_odd_hi * pick_odd_hi * BETBUILDER_DISCOUNT
+
+    def _bb_pick(fix_: dict, market_: str, pick_: str, bid_: int, bval_: str, odd_: float, prob_: float, is_second: bool) -> dict:
+        return {
+            "fixture_id": fix_["fixture_id"],
+            "home": fix_["home"], "away": fix_["away"],
+            "league": fix_["league"], "kickoff": fix_["kickoff"],
+            "market": market_, "pick": pick_,
+            "bet_id": bid_, "bet_value": bval_,
+            "odd": round(odd_, 2),
+            "probability": round(prob_, 4),
+            "betbuilder": is_second,
+            "reasoning": f"{market_} ({prob_*100:.0f}%)" + (" · BetBuilder" if is_second else ""),
+            "result": None,
+        }
+
+    bb_candidates: list[dict] = []
+
+    for fix in fixtures:
+        fixture_id = fix["fixture_id"]
+        p_home, p_draw, p_away = fix["p_home"], fix["p_draw"], fix["p_away"]
+        ps_home = fix.get("p_home_scores")
+        ps_away = fix.get("p_away_scores")
+        p15 = fix.get("p_over_15")
+        p25 = fix.get("p_over_25")
+        p45 = fix.get("p_under_45")
+
+        # Alle Markt-Kandidaten für dieses Spiel (weites Quoten-Fenster)
+        raw: list[tuple[str, str, int, str, float]] = []  # market, pick, bet_id, bet_value, prob
+
+        for dc_label, dc_bv, dc_prob in (
+            ("1X",  "Home/Draw", p_home + p_draw),
+            ("X2",  "Draw/Away", p_draw + p_away),
+            ("12",  "Home/Away", p_home + p_away),
+        ):
+            raw.append(("Doppelchance", dc_label, 12, dc_bv, dc_prob))
+
+        if p15 is not None:
+            raw.append(("Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", p15))
+        if p25 is not None:
+            raw.append(("Ueber 2,5 Tore", "Over 2.5", 5, "Over 2.5", p25))
+        if p45 is not None:
+            raw.append(("Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", p45))
+        if ps_home is not None:
+            raw.append(("Heimteam erzielt", "Over 0.5", 16, "Over 0.5", ps_home))
+        if ps_away is not None:
+            raw.append(("Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", ps_away))
+        raw.append(("Siegerwette", "Heimsieg",      1, "Home", p_home))
+        raw.append(("Siegerwette", "Auswaertssieg", 1, "Away", p_away))
+
+        # Odds dazu laden und nach Range filtern
+        market_picks: list[tuple[str, str, int, str, float, float]] = []  # + odd
+        for market_, pick_, bid_, bval_, prob_ in raw:
+            odd_ = _find_market_odd(odds_by_fixture, fixture_id, bid_, bval_)
+            if odd_ is not None and BB_SINGLE_LO <= odd_ <= BB_SINGLE_HI and prob_ >= 0.40:
+                market_picks.append((market_, pick_, bid_, bval_, prob_, odd_))
+
+        # Alle Paare: (i, j) mit i != j und (bet_id, bet_value) verschieden
+        for i in range(len(market_picks)):
+            for j in range(len(market_picks)):
+                if i == j:
+                    continue
+                m1, p1_, b1, bv1, prob1, o1 = market_picks[i]
+                m2, p2_, b2, bv2, prob2, o2 = market_picks[j]
+                # Keine zwei identischen Märkte
+                if (b1, bv1) == (b2, bv2):
+                    continue
+                # Keine zwei Siegerwetten (1X2 vs 1X2 ist kein sinnvoller BB)
+                if b1 == 1 and b2 == 1:
+                    continue
+                eff_odd = round(o1 * o2 * BETBUILDER_DISCOUNT, 4)
+                if not (pick_odd_lo <= eff_odd <= bb_max_eff):
+                    continue
+                eff_prob = prob1 * prob2 * BETBUILDER_DISCOUNT
+                eff_edge = round(eff_prob - (1.0 / eff_odd), 4)
+                pick_a = _bb_pick(fix, m1, p1_, b1, bv1, o1, prob1, False)
+                pick_b = _bb_pick(fix, m2, p2_, b2, bv2, o2, prob2, True)
+                bb_candidates.append({
+                    "fixture_id": fixture_id,
+                    "home": fix["home"], "away": fix["away"],
+                    "league": fix["league"], "kickoff": fix["kickoff"],
+                    "odd": eff_odd,
+                    "probability": round(eff_prob, 4),
+                    "edge": eff_edge,
+                    "is_bb_pair": True,
+                    "bb_picks": [pick_a, pick_b],
+                })
+
+    # Beste BB-Paare je Fixture behalten (nach Edge)
+    best_bb: dict[int, dict] = {}
+    for bb in bb_candidates:
+        fid_ = bb["fixture_id"]
+        if fid_ not in best_bb or bb["edge"] > best_bb[fid_]["edge"]:
+            best_bb[fid_] = bb
+    bb_candidates = list(best_bb.values())
+
+    # ── Alle Kandidaten zusammenführen und sortieren ──────────────────────────
+    all_candidates = unique_singles + bb_candidates
+    if not all_candidates:
         raise ValueError(
-            f"Keine Picks mit Betano-Quoten {pick_odd_lo:.2f}–{pick_odd_hi:.2f} für die gewählten Spiele gefunden."
+            f"Keine Picks mit Betano-Quoten {pick_odd_lo:.2f}–{pick_odd_hi:.2f} "
+            f"(inkl. BetBuilder) für die gewählten Spiele gefunden."
         )
 
-    # Duplikate entfernen (gleiche fixture+bet_id+bet_value)
-    seen: set[tuple] = set()
-    unique_candidates: list[dict] = []
-    for c in candidates:
-        key = _pick_identity(c)
-        if key not in seen:
-            seen.add(key)
-            unique_candidates.append(c)
-    candidates = unique_candidates
+    all_candidates.sort(key=lambda c: (-c["edge"], -c["probability"], c["odd"]))
 
-    # Sortieren: Edge absteigend, dann Wahrscheinlichkeit, dann Quote
-    candidates.sort(key=lambda c: (-c["edge"], -c["probability"], c["odd"]))
-
-    # DFS um Zielquote zu treffen (±20% Toleranz)
+    # ── DFS: Zielquote treffen (±20% Toleranz) ───────────────────────────────
+    # Jeder Kandidat belegt eine Fixture (ein Slot).
+    # BB-Paare zählen als 1 Slot, liefern aber 2 Picks im Ergebnis.
     target_lo = target_odd * 0.80
     target_hi = target_odd * 1.20
-
-    from math import log as _log
-
-    pool = candidates[:60]
+    pool = all_candidates[:72]
     target_log_lo = _log(max(target_lo, 1.001))
     target_log_hi = _log(target_hi)
 
@@ -1270,12 +1375,20 @@ async def generate_custom_slip(
 
     def dfs_custom(start: int, chosen: list[dict], used_ids: set[int], log_sum: float) -> None:
         nonlocal best
-        if len(chosen) > max_picks or log_sum > target_log_hi:
+        n_slots = len(chosen)
+        if n_slots > max_picks or log_sum > target_log_hi:
             return
-        if len(chosen) >= min_picks and target_log_lo <= log_sum <= target_log_hi:
-            best = ([dict(x) for x in chosen], round(_combined([x["odd"] for x in chosen]), 2))
+        if n_slots >= min_picks and target_log_lo <= log_sum <= target_log_hi:
+            # Expand BB pairs into actual picks list
+            expanded: list[dict] = []
+            for slot in chosen:
+                if slot.get("is_bb_pair"):
+                    expanded.extend(slot["bb_picks"])
+                else:
+                    expanded.append(dict(slot))
+            best = (expanded, round(_combined([s["odd"] for s in chosen]), 2))
             return
-        if len(chosen) == max_picks:
+        if n_slots == max_picks:
             return
         for idx in range(start, len(pool)):
             cand = pool[idx]
@@ -1293,7 +1406,7 @@ async def generate_custom_slip(
 
     if best is None:
         raise ValueError(
-            f"Keine Kombination mit {min_picks}–{max_picks} Picks gefunden, die die Zielquote "
+            f"Keine Kombination mit {min_picks}–{max_picks} Slots gefunden, die die Zielquote "
             f"{target_odd:.1f} (±20%) erreicht. Versuche eine andere Liga-/Spielauswahl oder "
             f"passe die Quoten-Grenzen an."
         )

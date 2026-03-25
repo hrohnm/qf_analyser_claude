@@ -1357,7 +1357,7 @@ function CustomSlipBuilder() {
   const [minPicks, setMinPicks] = useState<number | string>(3)
   const [maxPicks, setMaxPicks] = useState<number | string>(10)
   const [pickOddLo, setPickOddLo] = useState<number | string>(1.20)
-  const [pickOddHi, setPickOddHi] = useState<number | string>(1.80)
+  const [pickOddHi, setPickOddHi] = useState<number | string>(1.60)
   const [slipName, setSlipName] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [result, setResult] = useState<CustomSlip | null>(null)
