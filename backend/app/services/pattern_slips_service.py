@@ -1195,6 +1195,15 @@ async def generate_custom_slip(
     def _in_range(odd: float | None) -> bool:
         return odd is not None and pick_odd_lo <= odd <= pick_odd_hi
 
+    def _rich_reasoning(market: str, pick_label: str, probability: float, odd: float) -> str:
+        edge = probability - (1.0 / odd)
+        fair = round(1.0 / probability, 2)
+        return (
+            f"{market} {pick_label} · "
+            f"Modell {probability*100:.0f}% (Fairquote {fair}) · "
+            f"Betano {odd:.2f} · Edge {edge:+.1%}"
+        )
+
     # ── Einzelne Picks ────────────────────────────────────────────────────────
     single_candidates: list[dict] = []
     for fix in fixtures:
@@ -1206,32 +1215,35 @@ async def generate_custom_slip(
         ):
             odd = _find_market_odd(odds_by_fixture, fixture_id, bet_id, bet_value)
             if probability >= 0.60 and _in_range(odd):
-                single_candidates.append(_candidate_pick(fix, market, pick_label, bet_id, bet_value, odd, probability))
+                c = _candidate_pick(fix, market, pick_label, bet_id, bet_value, odd, probability)
+                c["reasoning"] = _rich_reasoning(market, pick_label, probability, odd)
+                single_candidates.append(c)
+
+        def _add(market_: str, pick_: str, bid_: int, bval_: str, prob_: float, odd_: float | None) -> None:
+            if prob_ >= 0.60 and _in_range(odd_):
+                c = _candidate_pick(fix, market_, pick_, bid_, bval_, odd_, prob_)
+                c["reasoning"] = _rich_reasoning(market_, pick_, prob_, odd_)
+                single_candidates.append(c)
 
         p15 = fix.get("p_over_15")
         odd_o15 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Over 1.5")
-        if p15 is not None and p15 >= 0.60 and _in_range(odd_o15):
-            single_candidates.append(_candidate_pick(fix, "Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", odd_o15, p15))
+        _add("Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", p15 or 0, odd_o15)
 
         p25 = fix.get("p_over_25")
         odd_o25 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Over 2.5")
-        if p25 is not None and p25 >= 0.60 and _in_range(odd_o25):
-            single_candidates.append(_candidate_pick(fix, "Ueber 2,5 Tore", "Over 2.5", 5, "Over 2.5", odd_o25, p25))
+        _add("Ueber 2,5 Tore", "Over 2.5", 5, "Over 2.5", p25 or 0, odd_o25)
 
         p45 = fix.get("p_under_45")
         odd_u45 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Under 4.5")
-        if p45 is not None and p45 >= 0.60 and _in_range(odd_u45):
-            single_candidates.append(_candidate_pick(fix, "Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", odd_u45, p45))
+        _add("Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", p45 or 0, odd_u45)
 
         ps_home = fix.get("p_home_scores")
         odd_home = _find_market_odd(odds_by_fixture, fixture_id, 16, "Over 0.5")
-        if ps_home is not None and ps_home >= 0.60 and _in_range(odd_home):
-            single_candidates.append(_candidate_pick(fix, "Heimteam erzielt", "Over 0.5", 16, "Over 0.5", odd_home, ps_home))
+        _add("Heimteam erzielt", "Over 0.5", 16, "Over 0.5", ps_home or 0, odd_home)
 
         ps_away = fix.get("p_away_scores")
         odd_away = _find_market_odd(odds_by_fixture, fixture_id, 17, "Over 0.5")
-        if ps_away is not None and ps_away >= 0.60 and _in_range(odd_away):
-            single_candidates.append(_candidate_pick(fix, "Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", odd_away, ps_away))
+        _add("Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", ps_away or 0, odd_away)
 
         for probability, bet_value, pick_label in (
             (fix["p_home"], "Home", "Heimsieg"),
@@ -1239,7 +1251,9 @@ async def generate_custom_slip(
         ):
             odd = _find_market_odd(odds_by_fixture, fixture_id, 1, bet_value)
             if probability >= 0.45 and _in_range(odd):
-                single_candidates.append(_candidate_pick(fix, "Siegerwette", pick_label, 1, bet_value, odd, probability))
+                c = _candidate_pick(fix, "Siegerwette", pick_label, 1, bet_value, odd, probability)
+                c["reasoning"] = _rich_reasoning("Siegerwette", pick_label, probability, odd)
+                single_candidates.append(c)
 
     # Duplikate entfernen
     seen_keys: set[tuple] = set()
@@ -1261,6 +1275,8 @@ async def generate_custom_slip(
 
     def _make_bb_pick(fix_: dict, market_: str, pick_: str, bid_: int, bval_: str,
                       odd_: float, prob_: float, is_bb: bool) -> dict:
+        fair_ = round(1.0 / prob_, 2) if prob_ > 0 else 0
+        label = "BetBuilder" if is_bb else "BB-Anker"
         return {
             "fixture_id": fix_["fixture_id"],
             "home": fix_["home"], "away": fix_["away"],
@@ -1270,7 +1286,7 @@ async def generate_custom_slip(
             "odd": round(odd_, 2),
             "probability": round(prob_, 4),
             "betbuilder": is_bb,
-            "reasoning": f"{market_} ({prob_*100:.0f}%)" + (" · BB" if is_bb else ""),
+            "reasoning": f"{label} · {market_} {pick_} · Modell {prob_*100:.0f}% (Fairquote {fair_}) · Betano {odd_:.2f}",
             "result": None,
         }
 
@@ -1373,49 +1389,70 @@ async def generate_custom_slip(
             f"(inkl. BetBuilder) für die gewählten Spiele gefunden."
         )
 
-    all_candidates.sort(key=lambda c: (-c["edge"], -c["probability"], c["odd"]))
-
     # ── DFS: Zielquote treffen (±20% Toleranz) ───────────────────────────────
     # Jeder Kandidat belegt eine Fixture (ein Slot).
-    # BB-Paare zählen als 1 Slot, liefern aber 2 Picks im Ergebnis.
+    # BB-Gruppen zählen als 1 Slot, liefern aber 2–4 Picks im Ergebnis.
+    #
+    # Problem: BB-Picks haben durch den 0.87-Rabatt negativen Edge und werden
+    # bei edge-basierter Sortierung immer ans Ende gerankt → werden nie gewählt.
+    # Lösung: Zwei DFS-Durchläufe:
+    #   Pass 1 – BB-Kandidaten zuerst (nach eff. Quote desc), dann Singles
+    #   Pass 2 – Nur Singles (Fallback, falls kein BB passt)
+    # Ergebnis: BB-Lösung wird bevorzugt wenn gefunden.
     target_lo = target_odd * 0.80
     target_hi = target_odd * 1.20
-    pool = all_candidates[:72]
     target_log_lo = _log(max(target_lo, 1.001))
     target_log_hi = _log(target_hi)
 
-    best: tuple[list[dict], float] | None = None
+    def _expand(chosen: list[dict]) -> tuple[list[dict], float]:
+        expanded: list[dict] = []
+        for slot in chosen:
+            if slot.get("is_bb_pair"):
+                expanded.extend(slot["bb_picks"])
+            else:
+                expanded.append(dict(slot))
+        return expanded, round(_combined([s["odd"] for s in chosen]), 2)
 
-    def dfs_custom(start: int, chosen: list[dict], used_ids: set[int], log_sum: float) -> None:
-        nonlocal best
-        n_slots = len(chosen)
-        if n_slots > max_picks or log_sum > target_log_hi:
-            return
-        if n_slots >= min_picks and target_log_lo <= log_sum <= target_log_hi:
-            # Expand BB pairs into actual picks list
-            expanded: list[dict] = []
-            for slot in chosen:
-                if slot.get("is_bb_pair"):
-                    expanded.extend(slot["bb_picks"])
-                else:
-                    expanded.append(dict(slot))
-            best = (expanded, round(_combined([s["odd"] for s in chosen]), 2))
-            return
-        if n_slots == max_picks:
-            return
-        for idx in range(start, len(pool)):
-            cand = pool[idx]
-            if cand["fixture_id"] in used_ids:
-                continue
-            chosen.append(cand)
-            used_ids.add(cand["fixture_id"])
-            dfs_custom(idx + 1, chosen, used_ids, log_sum + _log(cand["odd"]))
-            if best is not None:
+    def _run_dfs(pool: list[dict]) -> tuple[list[dict], float] | None:
+        result: tuple[list[dict], float] | None = None
+
+        def dfs(start: int, chosen: list[dict], used_ids: set[int], log_sum: float) -> None:
+            nonlocal result
+            n = len(chosen)
+            if n > max_picks or log_sum > target_log_hi:
                 return
-            used_ids.remove(cand["fixture_id"])
-            chosen.pop()
+            if n >= min_picks and target_log_lo <= log_sum <= target_log_hi:
+                result = _expand(chosen)
+                return
+            if n == max_picks:
+                return
+            for idx in range(start, len(pool)):
+                cand = pool[idx]
+                if cand["fixture_id"] in used_ids:
+                    continue
+                chosen.append(cand)
+                used_ids.add(cand["fixture_id"])
+                dfs(idx + 1, chosen, used_ids, log_sum + _log(cand["odd"]))
+                if result is not None:
+                    return
+                used_ids.remove(cand["fixture_id"])
+                chosen.pop()
 
-    dfs_custom(0, [], set(), 0.0)
+        dfs(0, [], set(), 0.0)
+        return result
+
+    # Pass 1: BB-Kandidaten zuerst (nach eff. Quote desc), dann Singles (nach Edge desc)
+    bb_pool = sorted(bb_candidates, key=lambda c: -c["odd"])
+    single_pool = sorted(unique_singles, key=lambda c: (-c["edge"], -c["probability"]))
+    pool_bb_first = (bb_pool + single_pool)[:72]
+    best = _run_dfs(pool_bb_first)
+
+    # Pass 2: Nur Singles als Fallback (oder wenn kein BB verfügbar)
+    if best is None or not any(s.get("betbuilder") for s in best[0]):
+        pool_singles = single_pool[:72]
+        fallback = _run_dfs(pool_singles)
+        if fallback is not None and best is None:
+            best = fallback
 
     if best is None:
         raise ValueError(

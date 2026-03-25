@@ -648,27 +648,31 @@ function SlipDetailModal({
               </Group>
               <Text size="sm" fw={600} mb={6}>{game.home} – {game.away}</Text>
               {game.picks.map((pick: any, pi: number) => (
-                <Group key={pi} justify="space-between" mb={4} pl="sm"
+                <Box key={pi} mb={6} pl="sm"
                   style={{ borderLeft: `3px solid var(--mantine-color-${resultColor(pick.result)}-5)` }}>
-                  <Group gap={4}>
-                    <Text size="xs" c="dimmed">{pick.market}:</Text>
-                    <Text size="xs" fw={500}>{pick.pick}</Text>
-                    {pick.betbuilder && (
-                      <Badge size="xs" variant="outline" color="orange">BB</Badge>
-                    )}
+                  <Group justify="space-between">
+                    <Group gap={4}>
+                      <Text size="xs" c="dimmed">{pick.market}:</Text>
+                      <Text size="xs" fw={500}>{pick.pick}</Text>
+                      {pick.betbuilder && (
+                        <Badge size="xs" variant="outline" color="orange">BB</Badge>
+                      )}
+                    </Group>
+                    <Group gap={8}>
+                      <Badge size="xs" variant="light" color="blue">{pick.odd?.toFixed(2)}</Badge>
+                      {pick.result && (
+                        <Badge size="xs" variant="filled" color={resultColor(pick.result)}>
+                          {pick.result === 'win' ? '✓' : pick.result === 'loss' ? '✗' : '~'}
+                        </Badge>
+                      )}
+                    </Group>
                   </Group>
-                  <Group gap={8}>
-                    {pick.probability != null && (
-                      <Text size="xs" c="dimmed">{(pick.probability * 100).toFixed(0)}%</Text>
-                    )}
-                    <Badge size="xs" variant="light" color="blue">{pick.odd?.toFixed(2)}</Badge>
-                    {pick.result && (
-                      <Badge size="xs" variant="filled" color={resultColor(pick.result)}>
-                        {pick.result === 'win' ? '✓' : pick.result === 'loss' ? '✗' : '~'}
-                      </Badge>
-                    )}
-                  </Group>
-                </Group>
+                  {pick.reasoning && (
+                    <Text size="xs" c="dimmed" mt={2} style={{ fontStyle: 'italic' }}>
+                      {pick.reasoning}
+                    </Text>
+                  )}
+                </Box>
               ))}
             </Box>
           ))}
@@ -1595,20 +1599,24 @@ function CustomSlipBuilder() {
                   {game.home} vs {game.away}
                 </Text>
                 {game.picks.map((pick: any, pi: number) => (
-                  <Group key={pi} justify="space-between" mb={2} pl="xs">
-                    <Group gap={4}>
-                      <Text size="xs" c="dimmed">{pick.market}:</Text>
-                      <Text size="xs" fw={500}>{pick.pick}</Text>
-                    </Group>
-                    <Group gap={8}>
-                      {pick.probability != null && (
-                        <Text size="xs" c="dimmed">{(pick.probability * 100).toFixed(0)}%</Text>
-                      )}
+                  <Box key={pi} mb={6} pl="xs"
+                    style={{ borderLeft: pick.betbuilder ? '2px solid var(--mantine-color-orange-5)' : undefined }}>
+                    <Group justify="space-between">
+                      <Group gap={4}>
+                        <Text size="xs" c="dimmed">{pick.market}:</Text>
+                        <Text size="xs" fw={500}>{pick.pick}</Text>
+                        {pick.betbuilder && <Badge size="xs" color="orange" variant="outline">BB</Badge>}
+                      </Group>
                       <Badge variant="light" color="blue" size="xs">
                         {pick.odd?.toFixed(2)}
                       </Badge>
                     </Group>
-                  </Group>
+                    {pick.reasoning && (
+                      <Text size="xs" c="dimmed" mt={2} style={{ fontStyle: 'italic' }}>
+                        {pick.reasoning}
+                      </Text>
+                    )}
+                  </Box>
                 ))}
               </Box>
             ))}
