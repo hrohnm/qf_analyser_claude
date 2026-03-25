@@ -412,6 +412,11 @@ export const bettingSlipsApi = {
   generateCustom: (params: CustomSlipParams) =>
     apiClient.post<{ slip_date: string; slip: CustomSlip }>('/betting-slips/generate-custom', params)
       .then(r => r.data),
+
+  saveCustom: (slipDate: string, slip: CustomSlip) =>
+    apiClient.post<{ slip_date: string; slip_nr: number; saved: boolean }>(
+      '/betting-slips/save-custom', { slip_date: slipDate, slip }
+    ).then(r => r.data),
 }
 
 export interface LeagueAdmin {

@@ -2,6 +2,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, update, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -152,6 +153,49 @@ async def generate_custom(body: CustomSlipBody, db: AsyncSession = Depends(get_d
         raise HTTPException(status_code=500, detail=f"Fehler bei der Generierung: {e}")
 
 
+class SaveCustomBody(BaseModel):
+    slip_date: date
+    slip: dict
+
+
+@router.post("/save-custom")
+async def save_custom(body: SaveCustomBody, db: AsyncSession = Depends(get_db)):
+    """Speichert einen generierten Custom-Schein in der Datenbank (source='custom')."""
+    existing = (await db.execute(
+        select(DayBettingSlip).where(
+            DayBettingSlip.slip_date == body.slip_date,
+            DayBettingSlip.source == "custom",
+        )
+    )).scalar_one_or_none()
+
+    current_slips: list[dict] = []
+    if existing:
+        raw = existing.slips
+        current_slips = raw.get("slips", []) if isinstance(raw, dict) else []
+
+    next_nr = max((s.get("slip_nr", 0) for s in current_slips), default=0) + 1
+    new_slip = dict(body.slip)
+    new_slip["slip_nr"] = next_nr
+    current_slips.append(new_slip)
+
+    full_data = {"slips": current_slips}
+    now = datetime.utcnow()
+    stmt = pg_insert(DayBettingSlip).values(
+        slip_date=body.slip_date,
+        source="custom",
+        slips=full_data,
+        model_version="custom",
+        generated_at=now,
+        updated_at=now,
+    ).on_conflict_do_update(
+        constraint="uq_day_betting_slip_date_source",
+        set_={"slips": full_data, "updated_at": now},
+    )
+    await db.execute(stmt)
+    await db.commit()
+    return {"slip_date": body.slip_date.isoformat(), "slip_nr": next_nr, "saved": True}
+
+
 @router.post("/regenerate-slip")
 async def regenerate_slip(
     slip_date: date,
@@ -275,7 +319,7 @@ async def get_history(
     q = select(DayBettingSlip).order_by(DayBettingSlip.slip_date.desc())
     if source:
         q = q.where(DayBettingSlip.source == source)
-    q = q.limit(days * 2)  # *2 weil ai + pattern pro Tag
+    q = q.limit(days * 3)  # *3 weil ai + pattern + custom pro Tag möglich
     slip_rows = (await db.execute(q)).scalars().all()
 
     if not slip_rows:

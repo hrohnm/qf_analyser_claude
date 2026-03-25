@@ -554,7 +554,7 @@ function SlipCard({
 
 function HistoryTab() {
   const queryClient = useQueryClient()
-  const [histSource, setHistSource] = useState<'all' | 'ai' | 'pattern'>('all')
+  const [histSource, setHistSource] = useState<'all' | 'ai' | 'pattern' | 'custom'>('all')
   const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
 
   const { data: history = [], isLoading, refetch } = useQuery({
@@ -580,8 +580,8 @@ function HistoryTab() {
     },
   })
 
-  const sourceLabel = (s: string) => s === 'ai' ? 'KI' : 'Pattern'
-  const sourceColor = (s: string) => s === 'ai' ? 'violet' : 'blue'
+  const sourceLabel = (s: string) => s === 'ai' ? 'KI' : s === 'custom' ? 'Eigener' : 'Pattern'
+  const sourceColor = (s: string) => s === 'ai' ? 'violet' : s === 'custom' ? 'grape' : 'blue'
 
   // Count open (placed but not settled) bets across all history
   const openCount = history.reduce(
@@ -635,6 +635,7 @@ function HistoryTab() {
             { label: 'Alle', value: 'all' },
             { label: 'Pattern', value: 'pattern' },
             { label: 'KI', value: 'ai' },
+            { label: 'Eigene', value: 'custom' },
           ]}
         />
       </Group>
@@ -1243,6 +1244,9 @@ function CustomSlipBuilder() {
     label: `${f.home_team_name ?? '?'} vs ${f.away_team_name ?? '?'} (${f.kickoff_utc ? dayjs(f.kickoff_utc).format('HH:mm') : '?'})`,
   }))
 
+  const [saved, setSaved] = useState(false)
+  const queryClient = useQueryClient()
+
   const generateMutation = useMutation({
     mutationFn: () => bettingSlipsApi.generateCustom({
       slip_date: slipDate,
@@ -1257,11 +1261,23 @@ function CustomSlipBuilder() {
     }),
     onSuccess: (data) => {
       setResult(data.slip)
+      setSaved(false)
       setError(null)
     },
     onError: (err: any) => {
       setError(err?.response?.data?.detail ?? 'Unbekannter Fehler')
       setResult(null)
+    },
+  })
+
+  const saveMutation = useMutation({
+    mutationFn: () => bettingSlipsApi.saveCustom(slipDate, result!),
+    onSuccess: () => {
+      setSaved(true)
+      queryClient.invalidateQueries({ queryKey: ['betting-history'] })
+    },
+    onError: (err: any) => {
+      setError(err?.response?.data?.detail ?? 'Fehler beim Speichern')
     },
   })
 
@@ -1400,9 +1416,24 @@ function CustomSlipBuilder() {
                   {gameGroups.length}-er Kombiwette · @ {result.combined_odd.toFixed(2)}
                 </Text>
               </Stack>
-              <Badge color="grape" variant="filled" size="lg">
-                {result.combined_odd.toFixed(2)}
-              </Badge>
+              <Group gap="xs">
+                <Badge color="grape" variant="filled" size="lg">
+                  {result.combined_odd.toFixed(2)}
+                </Badge>
+                {saved ? (
+                  <Badge color="green" variant="filled" size="sm" leftSection={<IconCheck size={12} />}>
+                    Gespeichert
+                  </Badge>
+                ) : (
+                  <Button
+                    size="xs" variant="white" color="grape"
+                    loading={saveMutation.isPending}
+                    onClick={() => saveMutation.mutate()}
+                  >
+                    Speichern
+                  </Button>
+                )}
+              </Group>
             </Group>
           </Box>
 
