@@ -11,6 +11,7 @@ import {
   GridCol,
   Group,
   Loader,
+  Modal,
   MultiSelect,
   NumberInput,
   Popover,
@@ -550,11 +551,140 @@ function SlipCard({
   )
 }
 
+// ─── Slip Detail Modal ────────────────────────────────────────────────────────
+
+function SlipDetailModal({
+  opened,
+  onClose,
+  slipDate,
+  source,
+  slipNr,
+  slipName,
+}: {
+  opened: boolean
+  onClose: () => void
+  slipDate: string
+  source: string
+  slipNr: number
+  slipName: string
+}) {
+  const { data, isLoading } = useQuery({
+    queryKey: ['slip-detail', slipDate, source],
+    queryFn: () => bettingSlipsApi.get(slipDate, source as 'ai' | 'pattern'),
+    enabled: opened,
+    staleTime: 60_000,
+  })
+
+  const slip = data?.slips?.find?.((s: any) => s.slip_nr === slipNr)
+    ?? (Array.isArray(data?.slips)
+      ? data.slips.find((s: any) => s.slip_nr === slipNr)
+      : null)
+
+  const picks: any[] = slip?.picks ?? []
+
+  // Group by fixture
+  const gameGroups: { fixtureId: number; home: string; away: string; league: string; kickoff: string; statusShort?: string | null; homeScore?: number | null; awayScore?: number | null; picks: any[] }[] = []
+  const seen = new Map<number, number>()
+  for (const pick of picks) {
+    const fid = pick.fixture_id
+    if (!seen.has(fid)) {
+      seen.set(fid, gameGroups.length)
+      gameGroups.push({
+        fixtureId: fid,
+        home: pick.home,
+        away: pick.away,
+        league: pick.league,
+        kickoff: pick.kickoff,
+        statusShort: pick.fixture_status_short ?? null,
+        homeScore: pick.fixture_home_score ?? null,
+        awayScore: pick.fixture_away_score ?? null,
+        picks: [],
+      })
+    }
+    gameGroups[seen.get(fid)!].picks.push(pick)
+  }
+
+  const resultColor = (r: string | null) =>
+    r === 'win' ? 'green' : r === 'loss' ? 'red' : r === 'push' ? 'yellow' : 'gray'
+
+  return (
+    <Modal
+      opened={opened}
+      onClose={onClose}
+      title={<Text fw={700}>{slipName} · {dayjs(slipDate).format('DD.MM.YYYY')}</Text>}
+      size="lg"
+    >
+      {isLoading && <Center py="xl"><Loader /></Center>}
+
+      {!isLoading && !slip && (
+        <Text c="dimmed" ta="center" py="md">Keine Daten gefunden.</Text>
+      )}
+
+      {slip && (
+        <Stack gap="sm">
+          <Group gap="xs">
+            <Badge color="grape" variant="filled">{slip.combined_odd?.toFixed(2)}</Badge>
+            <Text size="sm" c="dimmed">{gameGroups.length} Spiele</Text>
+            {slip.reasoning && (
+              <Text size="xs" c="dimmed" style={{ flex: 1 }}>{slip.reasoning}</Text>
+            )}
+          </Group>
+
+          {gameGroups.map((game, gi) => (
+            <Box key={game.fixtureId}>
+              {gi > 0 && <Divider />}
+              <Group gap={6} mt={gi > 0 ? 8 : 0} mb={4}>
+                <Text size="xs" c="dimmed" fw={500}>{game.kickoff}</Text>
+                <Text size="xs" c="dimmed">·</Text>
+                <Text size="xs" c="dimmed">{game.league}</Text>
+                {game.statusShort && ['FT', 'AET', 'PEN'].includes(game.statusShort) && (
+                  <>
+                    <Text size="xs" c="dimmed">·</Text>
+                    <Text size="xs" fw={700}>
+                      {game.homeScore} : {game.awayScore}
+                    </Text>
+                  </>
+                )}
+              </Group>
+              <Text size="sm" fw={600} mb={6}>{game.home} – {game.away}</Text>
+              {game.picks.map((pick: any, pi: number) => (
+                <Group key={pi} justify="space-between" mb={4} pl="sm"
+                  style={{ borderLeft: `3px solid var(--mantine-color-${resultColor(pick.result)}-5)` }}>
+                  <Group gap={4}>
+                    <Text size="xs" c="dimmed">{pick.market}:</Text>
+                    <Text size="xs" fw={500}>{pick.pick}</Text>
+                    {pick.betbuilder && (
+                      <Badge size="xs" variant="outline" color="orange">BB</Badge>
+                    )}
+                  </Group>
+                  <Group gap={8}>
+                    {pick.probability != null && (
+                      <Text size="xs" c="dimmed">{(pick.probability * 100).toFixed(0)}%</Text>
+                    )}
+                    <Badge size="xs" variant="light" color="blue">{pick.odd?.toFixed(2)}</Badge>
+                    {pick.result && (
+                      <Badge size="xs" variant="filled" color={resultColor(pick.result)}>
+                        {pick.result === 'win' ? '✓' : pick.result === 'loss' ? '✗' : '~'}
+                      </Badge>
+                    )}
+                  </Group>
+                </Group>
+              ))}
+            </Box>
+          ))}
+        </Stack>
+      )}
+    </Modal>
+  )
+}
+
+
 // ─── History tab ──────────────────────────────────────────────────────────────
 
 function HistoryTab() {
   const queryClient = useQueryClient()
   const [histSource, setHistSource] = useState<'all' | 'ai' | 'pattern' | 'custom'>('all')
+  const [detailSlip, setDetailSlip] = useState<{ slipDate: string; source: string; slipNr: number; name: string } | null>(null)
   const yesterday = dayjs().subtract(1, 'day').format('YYYY-MM-DD')
 
   const { data: history = [], isLoading, refetch } = useQuery({
@@ -648,6 +778,17 @@ function HistoryTab() {
         </Center>
       )}
 
+      {detailSlip && (
+        <SlipDetailModal
+          opened={!!detailSlip}
+          onClose={() => setDetailSlip(null)}
+          slipDate={detailSlip.slipDate}
+          source={detailSlip.source}
+          slipNr={detailSlip.slipNr}
+          slipName={detailSlip.name}
+        />
+      )}
+
       {history.map(day => {
         const dayOpen = day.slips.filter(s => s.placed?.status === 'placed').length
         return (
@@ -693,7 +834,11 @@ function HistoryTab() {
                     ? pb.stake * pb.combined_odd
                     : null
                   return (
-                    <Table.Tr key={i} style={{ opacity: pb ? 1 : 0.5 }}>
+                    <Table.Tr
+                      key={i}
+                      style={{ opacity: pb ? 1 : 0.5, cursor: 'pointer' }}
+                      onClick={() => setDetailSlip({ slipDate: day.slip_date, source: slip.source, slipNr: slip.slip_nr, name: slip.name })}
+                    >
                       <Table.Td>
                         <Badge size="xs" color={sourceColor(slip.source)} variant="light">
                           {sourceLabel(slip.source)}
