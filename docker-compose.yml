@@ -19,6 +19,7 @@ services:
     build: ./backend
     env_file: .env
     environment:
+      PYTHONPATH: /app
       DATABASE_URL: postgresql+asyncpg://qf_user:${DB_PASSWORD:-qf_secret}@db:5432/qf_analyser
       DATABASE_URL_SYNC: postgresql+psycopg2://qf_user:${DB_PASSWORD:-qf_secret}@db:5432/qf_analyser
     depends_on:
