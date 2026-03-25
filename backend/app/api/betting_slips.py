@@ -9,7 +9,7 @@ from app.models.day_betting_slip import DayBettingSlip
 from app.models.fixture import Fixture
 from app.models.placed_bet import PlacedBet
 from app.services.betting_slips_service import generate_betting_slips
-from app.services.pattern_slips_service import generate_pattern_slips, regenerate_single_slip
+from app.services.pattern_slips_service import generate_pattern_slips, regenerate_single_slip, generate_custom_slip
 from app.services.slip_evaluation_service import evaluate_slips_for_date
 
 router = APIRouter(prefix="/betting-slips", tags=["Betting Slips"])
@@ -114,6 +114,42 @@ async def generate_pattern(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Fehler: {e}")
+
+
+class CustomSlipBody(BaseModel):
+    slip_date: date | None = None
+    league_ids: list[int] | None = None
+    fixture_ids: list[int] | None = None
+    target_odd: float = 10.0
+    min_picks: int = 3
+    max_picks: int = 10
+    pick_odd_lo: float = 1.20
+    pick_odd_hi: float = 1.80
+    name: str | None = None
+
+
+@router.post("/generate-custom")
+async def generate_custom(body: CustomSlipBody, db: AsyncSession = Depends(get_db)):
+    """Generiert einen Wettschein aus gewählten Ligen/Spielen und einer Zielquote."""
+    target = body.slip_date or date.today()
+    try:
+        slip = await generate_custom_slip(
+            db,
+            target_date=target,
+            league_ids=body.league_ids,
+            fixture_ids=body.fixture_ids,
+            target_odd=body.target_odd,
+            min_picks=body.min_picks,
+            max_picks=body.max_picks,
+            pick_odd_lo=body.pick_odd_lo,
+            pick_odd_hi=body.pick_odd_hi,
+            name=body.name,
+        )
+        return {"slip_date": target.isoformat(), "slip": slip}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Fehler bei der Generierung: {e}")
 
 
 @router.post("/regenerate-slip")

@@ -252,6 +252,46 @@ export const playersApi = {
   }) => apiClient.get<PlayerOverview[]>('/players/overview', { params }).then(r => r.data),
 }
 
+export interface SlipPick {
+  fixture_id: number
+  home: string
+  away: string
+  league: string
+  kickoff: string
+  market: string
+  pick: string
+  bet_id: number
+  bet_value: string
+  odd: number
+  probability?: number
+  edge?: number
+  betbuilder: boolean
+  reasoning: string
+  result: 'win' | 'loss' | 'push' | null
+}
+
+export interface CustomSlip {
+  slip_nr: number
+  name: string
+  combined_odd: number
+  n_games: number
+  reasoning: string
+  picks: SlipPick[]
+  source: string
+}
+
+export interface CustomSlipParams {
+  slip_date?: string
+  league_ids?: number[]
+  fixture_ids?: number[]
+  target_odd?: number
+  min_picks?: number
+  max_picks?: number
+  pick_odd_lo?: number
+  pick_odd_hi?: number
+  name?: string
+}
+
 export interface PlacedBet {
   id: number
   slip_date: string
@@ -367,6 +407,10 @@ export const bettingSlipsApi = {
       ev: number
       profit: number
     }>>('/betting-slips/stats-by-slip', { params: source ? { source } : {} })
+      .then(r => r.data),
+
+  generateCustom: (params: CustomSlipParams) =>
+    apiClient.post<{ slip_date: string; slip: CustomSlip }>('/betting-slips/generate-custom', params)
       .then(r => r.data),
 }
 

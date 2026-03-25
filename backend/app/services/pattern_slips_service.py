@@ -1148,3 +1148,166 @@ async def generate_pattern_slips(
         "cached": False,
         "source": SOURCE,
     }
+
+
+# ─── Custom Slip Builder ──────────────────────────────────────────────────────
+
+async def generate_custom_slip(
+    db: AsyncSession,
+    target_date: date,
+    league_ids: list[int] | None = None,
+    fixture_ids: list[int] | None = None,
+    target_odd: float = 10.0,
+    min_picks: int = 3,
+    max_picks: int = 10,
+    pick_odd_lo: float = 1.20,
+    pick_odd_hi: float = 1.80,
+    name: str | None = None,
+) -> dict:
+    """
+    Generiert einen einzelnen Wettschein aus den gewählten Ligen/Spielen
+    und einer Zielquote. Keine KI, rein modellbasiert.
+
+    Parameter:
+    - league_ids: Nur Spiele aus diesen Ligen berücksichtigen (leer = alle)
+    - fixture_ids: Nur diese Spiele berücksichtigen (leer = alle aus league_ids)
+    - target_odd: Gewünschte Kombinationsquote (z.B. 5.0)
+    - min_picks / max_picks: Grenzen für die Anzahl der Picks
+    - pick_odd_lo / pick_odd_hi: Erlaubter Quoten-Bereich pro Pick
+    """
+    fixtures = await _load_fixtures_with_probs(db, target_date, league_ids=league_ids)
+
+    if fixture_ids:
+        id_set = set(fixture_ids)
+        fixtures = [f for f in fixtures if f["fixture_id"] in id_set]
+
+    if not fixtures:
+        raise ValueError("Keine Spiele mit Modell-Daten für die gewählte Auswahl gefunden.")
+
+    fids = [f["fixture_id"] for f in fixtures]
+    odds_by_fixture = await _load_betano_odds(db, fids)
+
+    # Kandidaten sammeln — mit custom Quoten-Bereich
+    def _in_range(odd: float | None) -> bool:
+        return odd is not None and pick_odd_lo <= odd <= pick_odd_hi
+
+    candidates: list[dict] = []
+    for fix in fixtures:
+        fixture_id = fix["fixture_id"]
+
+        for market, pick, bet_id, bet_value, probability in (
+            ("Doppelchance", "1X", 12, "Home/Draw", fix["p_home"] + fix["p_draw"]),
+            ("Doppelchance", "X2", 12, "Draw/Away", fix["p_draw"] + fix["p_away"]),
+        ):
+            odd = _find_market_odd(odds_by_fixture, fixture_id, bet_id, bet_value)
+            if probability >= 0.60 and _in_range(odd):
+                edge = round(probability - (1.0 / odd), 4)
+                candidates.append(_candidate_pick(fix, market, pick, bet_id, bet_value, odd, probability))
+
+        p15 = fix.get("p_over_15")
+        odd_o15 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Over 1.5")
+        if p15 is not None and p15 >= 0.60 and _in_range(odd_o15):
+            candidates.append(_candidate_pick(fix, "Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", odd_o15, p15))
+
+        p25 = fix.get("p_over_25")
+        odd_o25 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Over 2.5")
+        if p25 is not None and p25 >= 0.60 and _in_range(odd_o25):
+            candidates.append(_candidate_pick(fix, "Ueber 2,5 Tore", "Over 2.5", 5, "Over 2.5", odd_o25, p25))
+
+        p45 = fix.get("p_under_45")
+        odd_u45 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Under 4.5")
+        if p45 is not None and p45 >= 0.60 and _in_range(odd_u45):
+            candidates.append(_candidate_pick(fix, "Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", odd_u45, p45))
+
+        ps_home = fix.get("p_home_scores")
+        odd_home = _find_market_odd(odds_by_fixture, fixture_id, 16, "Over 0.5")
+        if ps_home is not None and ps_home >= 0.60 and _in_range(odd_home):
+            candidates.append(_candidate_pick(fix, "Heimteam erzielt", "Over 0.5", 16, "Over 0.5", odd_home, ps_home))
+
+        ps_away = fix.get("p_away_scores")
+        odd_away = _find_market_odd(odds_by_fixture, fixture_id, 17, "Over 0.5")
+        if ps_away is not None and ps_away >= 0.60 and _in_range(odd_away):
+            candidates.append(_candidate_pick(fix, "Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", odd_away, ps_away))
+
+        # Siegerwetten (home/away)
+        for probability, bet_value, pick_label in (
+            (fix["p_home"], "Home", "Heimsieg"),
+            (fix["p_away"], "Away", "Auswaertssieg"),
+        ):
+            odd = _find_market_odd(odds_by_fixture, fixture_id, 1, bet_value)
+            if probability >= 0.45 and _in_range(odd):
+                candidates.append(_candidate_pick(fix, "Siegerwette", pick_label, 1, bet_value, odd, probability))
+
+    if not candidates:
+        raise ValueError(
+            f"Keine Picks mit Betano-Quoten {pick_odd_lo:.2f}–{pick_odd_hi:.2f} für die gewählten Spiele gefunden."
+        )
+
+    # Duplikate entfernen (gleiche fixture+bet_id+bet_value)
+    seen: set[tuple] = set()
+    unique_candidates: list[dict] = []
+    for c in candidates:
+        key = _pick_identity(c)
+        if key not in seen:
+            seen.add(key)
+            unique_candidates.append(c)
+    candidates = unique_candidates
+
+    # Sortieren: Edge absteigend, dann Wahrscheinlichkeit, dann Quote
+    candidates.sort(key=lambda c: (-c["edge"], -c["probability"], c["odd"]))
+
+    # DFS um Zielquote zu treffen (±20% Toleranz)
+    target_lo = target_odd * 0.80
+    target_hi = target_odd * 1.20
+
+    from math import log as _log
+
+    pool = candidates[:60]
+    target_log_lo = _log(max(target_lo, 1.001))
+    target_log_hi = _log(target_hi)
+
+    best: tuple[list[dict], float] | None = None
+
+    def dfs_custom(start: int, chosen: list[dict], used_ids: set[int], log_sum: float) -> None:
+        nonlocal best
+        if len(chosen) > max_picks or log_sum > target_log_hi:
+            return
+        if len(chosen) >= min_picks and target_log_lo <= log_sum <= target_log_hi:
+            best = ([dict(x) for x in chosen], round(_combined([x["odd"] for x in chosen]), 2))
+            return
+        if len(chosen) == max_picks:
+            return
+        for idx in range(start, len(pool)):
+            cand = pool[idx]
+            if cand["fixture_id"] in used_ids:
+                continue
+            chosen.append(cand)
+            used_ids.add(cand["fixture_id"])
+            dfs_custom(idx + 1, chosen, used_ids, log_sum + _log(cand["odd"]))
+            if best is not None:
+                return
+            used_ids.remove(cand["fixture_id"])
+            chosen.pop()
+
+    dfs_custom(0, [], set(), 0.0)
+
+    if best is None:
+        raise ValueError(
+            f"Keine Kombination mit {min_picks}–{max_picks} Picks gefunden, die die Zielquote "
+            f"{target_odd:.1f} (±20%) erreicht. Versuche eine andere Liga-/Spielauswahl oder "
+            f"passe die Quoten-Grenzen an."
+        )
+
+    picks, combined_odd = best
+    slip_name = name or f"Custom · {target_odd:.1f}x"
+    n_games = len({p["fixture_id"] for p in picks})
+
+    return {
+        "slip_nr": 0,
+        "name": slip_name,
+        "combined_odd": combined_odd,
+        "n_games": n_games,
+        "reasoning": f"{slip_name} – {n_games} Spiele · Betano-Kombinationsquote {combined_odd:.2f}",
+        "picks": picks,
+        "source": "custom",
+    }

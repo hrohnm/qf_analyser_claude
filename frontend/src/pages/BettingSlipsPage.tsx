@@ -5,22 +5,26 @@ import {
   Button,
   Card,
   Center,
+  Collapse,
   Divider,
   Grid,
   GridCol,
   Group,
   Loader,
+  MultiSelect,
   NumberInput,
   Popover,
   Progress,
   RingProgress,
   SegmentedControl,
   SimpleGrid,
+  Slider,
   Stack,
   Switch,
   Table,
   Tabs,
   Text,
+  TextInput,
   Title,
   Tooltip,
 } from '@mantine/core'
@@ -29,6 +33,8 @@ import {
   IconAlertCircle,
   IconChartBar,
   IconCheck,
+  IconChevronDown,
+  IconChevronUp,
   IconCurrencyEuro,
   IconHistory,
   IconPlayerPlay,
@@ -38,11 +44,12 @@ import {
   IconTicket,
   IconTrophy,
   IconX,
+  IconWand,
 } from '@tabler/icons-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import dayjs from 'dayjs'
 import { useState } from 'react'
-import { bettingSlipsApi, type PlacedBet } from '../api'
+import { bettingSlipsApi, leaguesApi, fixturesApi, type PlacedBet, type CustomSlip } from '../api'
 // ISO display abbreviations — independent of flag-URL codes
 const COUNTRY_ABBR: Record<string, string> = {
   Germany: 'GER', France: 'FRA', Italy: 'ITA', Spain: 'ESP', England: 'ENG',
@@ -1193,6 +1200,256 @@ function StrategieTab() {
 
 // ─── Main page ────────────────────────────────────────────────────────────────
 
+// ─── Custom Slip Builder ──────────────────────────────────────────────────────
+
+function CustomSlipBuilder() {
+  const today = dayjs().format('YYYY-MM-DD')
+  const [slipDate, setSlipDate] = useState(today)
+  const [selectedLeagues, setSelectedLeagues] = useState<string[]>([])
+  const [selectedFixtures, setSelectedFixtures] = useState<string[]>([])
+  const [targetOdd, setTargetOdd] = useState<number>(10)
+  const [minPicks, setMinPicks] = useState<number | string>(3)
+  const [maxPicks, setMaxPicks] = useState<number | string>(10)
+  const [pickOddLo, setPickOddLo] = useState<number | string>(1.20)
+  const [pickOddHi, setPickOddHi] = useState<number | string>(1.80)
+  const [slipName, setSlipName] = useState('')
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [result, setResult] = useState<CustomSlip | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const { data: leagues = [] } = useQuery({
+    queryKey: ['leagues-list'],
+    queryFn: () => leaguesApi.list(),
+    staleTime: 300_000,
+  })
+
+  const { data: fixtures = [] } = useQuery({
+    queryKey: ['fixtures-for-date', slipDate],
+    queryFn: () => fixturesApi.today(slipDate),
+    staleTime: 60_000,
+  })
+
+  const leagueOptions = leagues.map(l => ({
+    value: String(l.id),
+    label: `${l.name} (${l.country})`,
+  }))
+
+  const filteredFixtures = selectedLeagues.length > 0
+    ? fixtures.filter(f => selectedLeagues.includes(String(f.league_id)))
+    : fixtures
+
+  const fixtureOptions = filteredFixtures.map(f => ({
+    value: String(f.id),
+    label: `${f.home_team_name ?? '?'} vs ${f.away_team_name ?? '?'} (${f.kickoff_utc ? dayjs(f.kickoff_utc).format('HH:mm') : '?'})`,
+  }))
+
+  const generateMutation = useMutation({
+    mutationFn: () => bettingSlipsApi.generateCustom({
+      slip_date: slipDate,
+      league_ids: selectedLeagues.length > 0 ? selectedLeagues.map(Number) : undefined,
+      fixture_ids: selectedFixtures.length > 0 ? selectedFixtures.map(Number) : undefined,
+      target_odd: targetOdd,
+      min_picks: Number(minPicks),
+      max_picks: Number(maxPicks),
+      pick_odd_lo: Number(pickOddLo),
+      pick_odd_hi: Number(pickOddHi),
+      name: slipName || undefined,
+    }),
+    onSuccess: (data) => {
+      setResult(data.slip)
+      setError(null)
+    },
+    onError: (err: any) => {
+      setError(err?.response?.data?.detail ?? 'Unbekannter Fehler')
+      setResult(null)
+    },
+  })
+
+  const picks = result?.picks ?? []
+  // Group by fixture
+  const gameGroups: { fixtureId: number; home: string; away: string; league: string; kickoff: string; picks: any[] }[] = []
+  const seenFids = new Map<number, number>()
+  for (const pick of picks) {
+    const fid = pick.fixture_id
+    if (!seenFids.has(fid)) {
+      seenFids.set(fid, gameGroups.length)
+      gameGroups.push({ fixtureId: fid, home: pick.home, away: pick.away, league: pick.league, kickoff: pick.kickoff, picks: [] })
+    }
+    gameGroups[seenFids.get(fid)!].picks.push(pick)
+  }
+
+  return (
+    <Stack gap="md">
+      <Card withBorder p="md">
+        <Stack gap="md">
+          <Text fw={600}>Parameter</Text>
+
+          <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="sm">
+            <TextInput
+              label="Datum"
+              type="date"
+              value={slipDate}
+              onChange={e => { setSlipDate(e.target.value); setSelectedFixtures([]) }}
+            />
+            <TextInput
+              label="Schein-Name (optional)"
+              placeholder="z.B. Mein Custom Schein"
+              value={slipName}
+              onChange={e => setSlipName(e.target.value)}
+            />
+          </SimpleGrid>
+
+          <MultiSelect
+            label="Ligen (leer = alle verfügbaren)"
+            placeholder="Ligen auswählen..."
+            data={leagueOptions}
+            value={selectedLeagues}
+            onChange={v => { setSelectedLeagues(v); setSelectedFixtures([]) }}
+            searchable
+            clearable
+          />
+
+          <MultiSelect
+            label={`Einzelne Spiele (optional, ${filteredFixtures.length} verfügbar)`}
+            placeholder="Spiele auswählen oder leer lassen für alle..."
+            data={fixtureOptions}
+            value={selectedFixtures}
+            onChange={setSelectedFixtures}
+            searchable
+            clearable
+            disabled={filteredFixtures.length === 0}
+          />
+
+          <Box>
+            <Text size="sm" fw={500} mb={6}>Zielquote: {targetOdd.toFixed(1)}</Text>
+            <Slider
+              min={2}
+              max={100}
+              step={0.5}
+              value={targetOdd}
+              onChange={setTargetOdd}
+              marks={[
+                { value: 5, label: '5x' },
+                { value: 10, label: '10x' },
+                { value: 20, label: '20x' },
+                { value: 50, label: '50x' },
+              ]}
+            />
+          </Box>
+
+          <Button
+            variant="subtle"
+            size="xs"
+            leftSection={advancedOpen ? <IconChevronUp size={14} /> : <IconChevronDown size={14} />}
+            onClick={() => setAdvancedOpen(o => !o)}
+            style={{ alignSelf: 'flex-start' }}
+          >
+            Erweiterte Einstellungen
+          </Button>
+
+          <Collapse in={advancedOpen}>
+            <SimpleGrid cols={{ base: 2, sm: 4 }} spacing="sm">
+              <NumberInput
+                label="Min. Picks"
+                min={1} max={20} value={minPicks}
+                onChange={setMinPicks}
+              />
+              <NumberInput
+                label="Max. Picks"
+                min={1} max={20} value={maxPicks}
+                onChange={setMaxPicks}
+              />
+              <NumberInput
+                label="Pick-Quote min"
+                min={1.01} max={10} step={0.05} decimalScale={2}
+                value={pickOddLo}
+                onChange={setPickOddLo}
+              />
+              <NumberInput
+                label="Pick-Quote max"
+                min={1.01} max={20} step={0.05} decimalScale={2}
+                value={pickOddHi}
+                onChange={setPickOddHi}
+              />
+            </SimpleGrid>
+          </Collapse>
+
+          <Button
+            leftSection={<IconWand size={16} />}
+            loading={generateMutation.isPending}
+            onClick={() => generateMutation.mutate()}
+          >
+            Schein generieren
+          </Button>
+        </Stack>
+      </Card>
+
+      {error && (
+        <Alert color="red" variant="light" icon={<IconAlertCircle size={16} />}>
+          {error}
+        </Alert>
+      )}
+
+      {result && (
+        <Card withBorder p={0} style={{ overflow: 'hidden' }}>
+          <Box px="sm" py={8} style={{ background: 'var(--mantine-color-grape-8)' }}>
+            <Group justify="space-between">
+              <Stack gap={0}>
+                <Text size="sm" fw={700} c="white">{result.name}</Text>
+                <Text size="xs" c="rgba(255,255,255,0.7)">
+                  {gameGroups.length}-er Kombiwette · @ {result.combined_odd.toFixed(2)}
+                </Text>
+              </Stack>
+              <Badge color="grape" variant="filled" size="lg">
+                {result.combined_odd.toFixed(2)}
+              </Badge>
+            </Group>
+          </Box>
+
+          <Stack gap={0} p="sm">
+            {gameGroups.map((game, gi) => (
+              <Box key={game.fixtureId}>
+                {gi > 0 && <Divider my={6} />}
+                <Group gap={6} mb={4}>
+                  <Text size="xs" c="dimmed">{game.kickoff}</Text>
+                  <Text size="xs" c="dimmed">·</Text>
+                  <Text size="xs" c="dimmed">{game.league}</Text>
+                </Group>
+                <Text size="sm" fw={600} mb={4}>
+                  {game.home} vs {game.away}
+                </Text>
+                {game.picks.map((pick: any, pi: number) => (
+                  <Group key={pi} justify="space-between" mb={2} pl="xs">
+                    <Group gap={4}>
+                      <Text size="xs" c="dimmed">{pick.market}:</Text>
+                      <Text size="xs" fw={500}>{pick.pick}</Text>
+                    </Group>
+                    <Group gap={8}>
+                      {pick.probability != null && (
+                        <Text size="xs" c="dimmed">{(pick.probability * 100).toFixed(0)}%</Text>
+                      )}
+                      <Badge variant="light" color="blue" size="xs">
+                        {pick.odd?.toFixed(2)}
+                      </Badge>
+                    </Group>
+                  </Group>
+                ))}
+              </Box>
+            ))}
+          </Stack>
+
+          {result.reasoning && (
+            <Box px="sm" pb="sm">
+              <Text size="xs" c="dimmed">{result.reasoning}</Text>
+            </Box>
+          )}
+        </Card>
+      )}
+    </Stack>
+  )
+}
+
+
 export function BettingSlipsPage() {
   return (
     <Stack gap="md">
@@ -1212,6 +1469,9 @@ export function BettingSlipsPage() {
           <Tabs.Tab value="verlauf" leftSection={<IconHistory size={14} />}>
             Verlauf
           </Tabs.Tab>
+          <Tabs.Tab value="custom" leftSection={<IconWand size={14} />}>
+            Eigener Schein
+          </Tabs.Tab>
         </Tabs.List>
 
         <Tabs.Panel value="strategie">
@@ -1224,6 +1484,10 @@ export function BettingSlipsPage() {
 
         <Tabs.Panel value="verlauf">
           <HistoryTab />
+        </Tabs.Panel>
+
+        <Tabs.Panel value="custom">
+          <CustomSlipBuilder />
         </Tabs.Panel>
       </Tabs>
     </Stack>
