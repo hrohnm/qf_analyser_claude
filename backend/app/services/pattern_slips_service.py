@@ -1250,15 +1250,17 @@ async def generate_custom_slip(
             seen_keys.add(k)
             unique_singles.append(c)
 
-    # ── BetBuilder-Paare: beliebige 2 Märkte vom selben Spiel ────────────────
-    # Effektive Quote = odd1 * odd2 * 0.87
-    # Wir sammeln zuerst alle möglichen Einzel-Picks je Fixture mit einem
-    # weiteren Quoten-Fenster (1.10–4.0) und bilden dann alle Paare.
-    # Nur Paare, deren effektive Quote im Zielbereich liegt, werden genutzt.
-    BB_SINGLE_LO, BB_SINGLE_HI = 1.10, 4.0
-    bb_max_eff = pick_odd_hi * pick_odd_hi * BETBUILDER_DISCOUNT
+    # ── BetBuilder-Gruppen: 2–4 Picks aus demselben Spiel ────────────────────
+    # Picks im BB haben eine feste Quote 1.15–1.40.
+    # Effektive Gesamtquote = prod(odds) * 0.87^(n-1)  (ein Rabatt pro weiteren Pick)
+    # Jede Fixture liefert maximal einen BB-Kandidaten (bester Edge).
+    from itertools import combinations as _combinations
 
-    def _bb_pick(fix_: dict, market_: str, pick_: str, bid_: int, bval_: str, odd_: float, prob_: float, is_second: bool) -> dict:
+    BB_PICK_LO, BB_PICK_HI = 1.15, 1.40
+    BB_SIZES = (2, 3, 4)
+
+    def _make_bb_pick(fix_: dict, market_: str, pick_: str, bid_: int, bval_: str,
+                      odd_: float, prob_: float, is_bb: bool) -> dict:
         return {
             "fixture_id": fix_["fixture_id"],
             "home": fix_["home"], "away": fix_["away"],
@@ -1267,8 +1269,8 @@ async def generate_custom_slip(
             "bet_id": bid_, "bet_value": bval_,
             "odd": round(odd_, 2),
             "probability": round(prob_, 4),
-            "betbuilder": is_second,
-            "reasoning": f"{market_} ({prob_*100:.0f}%)" + (" · BetBuilder" if is_second else ""),
+            "betbuilder": is_bb,
+            "reasoning": f"{market_} ({prob_*100:.0f}%)" + (" · BB" if is_bb else ""),
             "result": None,
         }
 
@@ -1277,80 +1279,91 @@ async def generate_custom_slip(
     for fix in fixtures:
         fixture_id = fix["fixture_id"]
         p_home, p_draw, p_away = fix["p_home"], fix["p_draw"], fix["p_away"]
-        ps_home = fix.get("p_home_scores")
-        ps_away = fix.get("p_away_scores")
+
+        # Alle möglichen Märkte für dieses Spiel
+        raw_markets: list[tuple[str, str, int, str, float]] = [
+            ("Doppelchance", "1X",  12, "Home/Draw", p_home + p_draw),
+            ("Doppelchance", "X2",  12, "Draw/Away", p_draw + p_away),
+            ("Doppelchance", "12",  12, "Home/Away", p_home + p_away),
+        ]
         p15 = fix.get("p_over_15")
         p25 = fix.get("p_over_25")
         p45 = fix.get("p_under_45")
-
-        # Alle Markt-Kandidaten für dieses Spiel (weites Quoten-Fenster)
-        raw: list[tuple[str, str, int, str, float]] = []  # market, pick, bet_id, bet_value, prob
-
-        for dc_label, dc_bv, dc_prob in (
-            ("1X",  "Home/Draw", p_home + p_draw),
-            ("X2",  "Draw/Away", p_draw + p_away),
-            ("12",  "Home/Away", p_home + p_away),
-        ):
-            raw.append(("Doppelchance", dc_label, 12, dc_bv, dc_prob))
-
+        ps_home = fix.get("p_home_scores")
+        ps_away = fix.get("p_away_scores")
         if p15 is not None:
-            raw.append(("Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", p15))
+            raw_markets.append(("Ueber 1,5 Tore",       "Over 1.5",  5,  "Over 1.5",  p15))
         if p25 is not None:
-            raw.append(("Ueber 2,5 Tore", "Over 2.5", 5, "Over 2.5", p25))
+            raw_markets.append(("Ueber 2,5 Tore",        "Over 2.5",  5,  "Over 2.5",  p25))
         if p45 is not None:
-            raw.append(("Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", p45))
+            raw_markets.append(("Unter 4,5 Tore",        "Under 4.5", 5,  "Under 4.5", p45))
         if ps_home is not None:
-            raw.append(("Heimteam erzielt", "Over 0.5", 16, "Over 0.5", ps_home))
+            raw_markets.append(("Heimteam erzielt",       "Over 0.5",  16, "Over 0.5",  ps_home))
         if ps_away is not None:
-            raw.append(("Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", ps_away))
-        raw.append(("Siegerwette", "Heimsieg",      1, "Home", p_home))
-        raw.append(("Siegerwette", "Auswaertssieg", 1, "Away", p_away))
+            raw_markets.append(("Auswaertsteam erzielt",  "Over 0.5",  17, "Over 0.5",  ps_away))
+        raw_markets.append(("Siegerwette", "Heimsieg",      1, "Home", p_home))
+        raw_markets.append(("Siegerwette", "Auswaertssieg", 1, "Away", p_away))
 
-        # Odds dazu laden und nach Range filtern
-        market_picks: list[tuple[str, str, int, str, float, float]] = []  # + odd
-        for market_, pick_, bid_, bval_, prob_ in raw:
+        # Betano-Quoten laden, nach BB-Einzel-Range filtern
+        eligible: list[tuple[str, str, int, str, float, float]] = []
+        for market_, pick_, bid_, bval_, prob_ in raw_markets:
             odd_ = _find_market_odd(odds_by_fixture, fixture_id, bid_, bval_)
-            if odd_ is not None and BB_SINGLE_LO <= odd_ <= BB_SINGLE_HI and prob_ >= 0.40:
-                market_picks.append((market_, pick_, bid_, bval_, prob_, odd_))
+            if odd_ is not None and BB_PICK_LO <= odd_ <= BB_PICK_HI and prob_ >= 0.40:
+                eligible.append((market_, pick_, bid_, bval_, prob_, odd_))
 
-        # Alle Paare: (i, j) mit i != j und (bet_id, bet_value) verschieden
-        for i in range(len(market_picks)):
-            for j in range(len(market_picks)):
-                if i == j:
+        if len(eligible) < 2:
+            continue
+
+        best_bb_for_fix: dict | None = None
+
+        for size in BB_SIZES:
+            if len(eligible) < size:
+                continue
+            for combo in _combinations(range(len(eligible)), size):
+                items = [eligible[k] for k in combo]
+
+                # Keine zwei Siegerwetten im selben BB
+                winner_count = sum(1 for it in items if it[2] == 1)
+                if winner_count >= 2:
                     continue
-                m1, p1_, b1, bv1, prob1, o1 = market_picks[i]
-                m2, p2_, b2, bv2, prob2, o2 = market_picks[j]
-                # Keine zwei identischen Märkte
-                if (b1, bv1) == (b2, bv2):
+                # Keine doppelten Märkte (gleiche bet_id + bet_value)
+                market_keys = {(it[2], it[3]) for it in items}
+                if len(market_keys) < size:
                     continue
-                # Keine zwei Siegerwetten (1X2 vs 1X2 ist kein sinnvoller BB)
-                if b1 == 1 and b2 == 1:
+
+                odds_list = [it[5] for it in items]
+                probs_list = [it[4] for it in items]
+                eff_odd = round(
+                    _combined(odds_list) * (BETBUILDER_DISCOUNT ** (size - 1)), 4
+                )
+                # Mindest-Effektivquote = pick_odd_lo (damit der Slot sinnvoll ist)
+                if eff_odd < pick_odd_lo:
                     continue
-                eff_odd = round(o1 * o2 * BETBUILDER_DISCOUNT, 4)
-                if not (pick_odd_lo <= eff_odd <= bb_max_eff):
-                    continue
-                eff_prob = prob1 * prob2 * BETBUILDER_DISCOUNT
+
+                eff_prob = 1.0
+                for p_ in probs_list:
+                    eff_prob *= p_
+                eff_prob = round(eff_prob, 6)
                 eff_edge = round(eff_prob - (1.0 / eff_odd), 4)
-                pick_a = _bb_pick(fix, m1, p1_, b1, bv1, o1, prob1, False)
-                pick_b = _bb_pick(fix, m2, p2_, b2, bv2, o2, prob2, True)
-                bb_candidates.append({
-                    "fixture_id": fixture_id,
-                    "home": fix["home"], "away": fix["away"],
-                    "league": fix["league"], "kickoff": fix["kickoff"],
-                    "odd": eff_odd,
-                    "probability": round(eff_prob, 4),
-                    "edge": eff_edge,
-                    "is_bb_pair": True,
-                    "bb_picks": [pick_a, pick_b],
-                })
 
-    # Beste BB-Paare je Fixture behalten (nach Edge)
-    best_bb: dict[int, dict] = {}
-    for bb in bb_candidates:
-        fid_ = bb["fixture_id"]
-        if fid_ not in best_bb or bb["edge"] > best_bb[fid_]["edge"]:
-            best_bb[fid_] = bb
-    bb_candidates = list(best_bb.values())
+                if best_bb_for_fix is None or eff_edge > best_bb_for_fix["edge"]:
+                    bb_picks = [
+                        _make_bb_pick(fix, it[0], it[1], it[2], it[3], it[5], it[4], idx > 0)
+                        for idx, it in enumerate(items)
+                    ]
+                    best_bb_for_fix = {
+                        "fixture_id": fixture_id,
+                        "home": fix["home"], "away": fix["away"],
+                        "league": fix["league"], "kickoff": fix["kickoff"],
+                        "odd": eff_odd,
+                        "probability": eff_prob,
+                        "edge": eff_edge,
+                        "is_bb_pair": True,
+                        "bb_picks": bb_picks,
+                    }
+
+        if best_bb_for_fix is not None:
+            bb_candidates.append(best_bb_for_fix)
 
     # ── Alle Kandidaten zusammenführen und sortieren ──────────────────────────
     all_candidates = unique_singles + bb_candidates
