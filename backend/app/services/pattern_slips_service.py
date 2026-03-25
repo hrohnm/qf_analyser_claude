@@ -561,20 +561,13 @@ def _build_slip1(fixtures: list[dict]) -> tuple[list[dict], float]:
     return picks, combined
 
 
-# ─── Slip 2: Siegerschein ─────────────────────────────────────────────────────
+# ─── Slip 2: DC + Favorit trifft + Ü1,5 ─────────────────────────────────────
 
 def _build_slip2(fixtures: list[dict]) -> tuple[list[dict], float]:
     """
-    Outright wins (Home or Away, no draw).
-
-    Thresholds:
-      Home win  : p_home >= 0.55  (clear home favourite)
-      Away win  : p_away >= 0.52  (away favourite is a strong signal even at lower %)
-    Upper cap   : 0.85  (above that fair odds < 1.18 → boring)
-
-    Sort order: ascending probability = highest fair odds first.
-    This lets the greedy _pick_for_target reach 8–12 in 4–6 picks instead of
-    requiring 8+ low-odds picks.
+    Mix aus DC + Favorit trifft + Über 1,5 Tore (Legacy-Builder, nicht direkt genutzt).
+    Aktive Logik läuft über generate_pattern_slips / regenerate_single_slip mit
+    cands_dc_fav_over (bet_ids 12, 16, 17, 5 exkl. Under 4.5).
     """
     candidates: list[dict] = []
 
@@ -944,6 +937,12 @@ async def regenerate_single_slip(
 
     if slip_nr == 7:
         picks, combined = _build_slip7(fixtures, odds_by_fixture)
+    elif slip_nr == 2:
+        cands2 = [
+            c for c in candidates
+            if c["bet_id"] in (12, 16, 17, 5) and c.get("bet_value") != "Under 4.5"
+        ]
+        picks, combined = _build_slip_from_candidates(cands2, excluded_ids)
     else:
         picks, combined = _build_slip_from_candidates(candidates, excluded_ids)
     name = SLIP_NAMES[slip_nr]
@@ -1053,11 +1052,15 @@ async def generate_pattern_slips(
 
     # Try to build structurally different slips by splitting markets:
     # Kombi 1 = DC + Team trifft (sicherer, korrelierte Events)
-    # Kombi 2 = Siegerwette + Ü1.5 (direkter, verschiedene Signale)
+    # Kombi 2 = DC + Favorit trifft + Ü1,5 (andere Fixtures als Kombi 1)
     cands_dc_scores = [c for c in candidates if c["bet_id"] in (12, 16, 17)]
-    cands_winner_over = [c for c in candidates if c["bet_id"] in (1, 5)]
     picks1_split, odd1_split = _build_slip_from_candidates(cands_dc_scores) if cands_dc_scores else ([], 0.0)
-    picks2_split, odd2_split = _build_slip_from_candidates(cands_winner_over) if cands_winner_over else ([], 0.0)
+    used_by_slip1 = {p["fixture_id"] for p in picks1_split}
+    cands_dc_fav_over = [
+        c for c in candidates
+        if c["bet_id"] in (12, 16, 17, 5) and c.get("bet_value") != "Under 4.5"
+    ]
+    picks2_split, odd2_split = _build_slip_from_candidates(cands_dc_fav_over, used_by_slip1) if cands_dc_fav_over else ([], 0.0)
 
     if picks1_split and picks2_split:
         picks1, odd1, picks2, odd2 = picks1_split, odd1_split, picks2_split, odd2_split
