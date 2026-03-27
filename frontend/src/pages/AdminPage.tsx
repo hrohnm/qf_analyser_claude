@@ -365,6 +365,18 @@ export function AdminPage() {
                       </Table.Td>
                       <Table.Td>
                         {syncSt && <SyncStatusBadge status={syncSt} />}
+                        {league.is_active && !syncSt && (
+                          <Button
+                            size="xs"
+                            variant="subtle"
+                            color="blue"
+                            leftSection={<IconRefresh size={12} />}
+                            onClick={() => startActivateAndSync(league.id)}
+                            loading={isStarting}
+                          >
+                            Sync
+                          </Button>
+                        )}
                       </Table.Td>
                       <Table.Td>
                         <Switch
