@@ -31,6 +31,14 @@ LEAGUES: list[dict] = [
     {"id": 2,   "name": "UEFA Champions League", "country": "Europe", "tier": 0},
     {"id": 3,   "name": "UEFA Europa League",    "country": "Europe", "tier": 0},
     {"id": 848, "name": "UEFA Conference League","country": "Europe", "tier": 0},
+    # FIFA World Cup & Qualifications
+    {"id": 1,   "name": "FIFA World Cup",                        "country": "World", "tier": 0},
+    {"id": 32,  "name": "WC Qualification - South America",      "country": "World", "tier": 0},
+    {"id": 33,  "name": "WC Qualification - Asia",               "country": "World", "tier": 0},
+    {"id": 34,  "name": "WC Qualification - Africa",             "country": "World", "tier": 0},
+    {"id": 31,  "name": "WC Qualification - North America",      "country": "World", "tier": 0},
+    {"id": 35,  "name": "WC Qualification - Europe (UEFA)",      "country": "World", "tier": 0},
+    {"id": 36,  "name": "WC Qualification - Oceania",            "country": "World", "tier": 0},
 ]
 
 LEAGUE_IDS = [l["id"] for l in LEAGUES]

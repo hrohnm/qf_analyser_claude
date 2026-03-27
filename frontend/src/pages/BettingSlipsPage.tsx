@@ -570,15 +570,16 @@ function SlipDetailModal({
 }) {
   const { data, isLoading } = useQuery({
     queryKey: ['slip-detail', slipDate, source],
-    queryFn: () => bettingSlipsApi.get(slipDate, source as 'ai' | 'pattern'),
+    queryFn: () => bettingSlipsApi.get(slipDate, source as any),
     enabled: opened,
     staleTime: 60_000,
   })
 
-  const slip = data?.slips?.find?.((s: any) => s.slip_nr === slipNr)
-    ?? (Array.isArray(data?.slips)
-      ? data.slips.find((s: any) => s.slip_nr === slipNr)
-      : null)
+  // data.slips kann ein Array oder ein Objekt {slips:[...]} sein
+  const slipsList: any[] = Array.isArray(data?.slips)
+    ? data.slips
+    : (data?.slips?.slips ?? [])
+  const slip = slipsList.find((s: any) => s.slip_nr === slipNr) ?? null
 
   const picks: any[] = slip?.picks ?? []
 

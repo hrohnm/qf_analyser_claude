@@ -11,6 +11,7 @@ Rules:
 from __future__ import annotations
 
 import logging
+from itertools import combinations as _combinations
 from math import log
 from datetime import datetime, date
 from typing import Any
@@ -36,6 +37,7 @@ BETANO_ID = 32
 
 TARGET_LO, TARGET_HI = 10.0, 12.0
 PICK_ODD_LO, PICK_ODD_HI = 1.20, 1.40
+BB_PICK_ODD_LO, BB_PICK_ODD_HI = 1.15, 1.40  # per-leg range for BetBuilder pairs
 MIN_PICKS_PER_SLIP, MAX_PICKS_PER_SLIP = 7, 11
 
 # Slip 7 – Favoriten Auswärts
@@ -256,6 +258,88 @@ def _collect_candidates(
                 candidates.append(_candidate_pick(fix, "Siegerwette", pick, 1, bet_value, odd, probability))
 
     candidates.sort(key=lambda c: (-c["edge"], -c["probability"], c["odd"], c["fixture_id"], c["bet_id"]))
+
+    # ── BetBuilder pair candidates ─────────────────────────────────────────────
+    # For each fixture, collect picks with individual odds in [BB_PICK_ODD_LO, BB_PICK_ODD_HI]
+    # and generate all 2-pick combinations as a single "BB pair" candidate.
+    bb_eligible_by_fixture: dict[int, list[dict]] = {}
+    for fix in fixtures:
+        fixture_id = fix["fixture_id"]
+        bb_picks: list[dict] = []
+
+        for market, pick, bet_id, bet_value, probability in (
+            ("Doppelchance", "1X", 12, "Home/Draw", fix["p_home"] + fix["p_draw"]),
+            ("Doppelchance", "X2", 12, "Draw/Away", fix["p_draw"] + fix["p_away"]),
+        ):
+            odd = _find_market_odd(odds_by_fixture, fixture_id, bet_id, bet_value)
+            if probability >= 0.70 and odd is not None and BB_PICK_ODD_LO <= odd <= BB_PICK_ODD_HI:
+                bb_picks.append(_candidate_pick(fix, market, pick, bet_id, bet_value, odd, probability))
+
+        p15 = fix.get("p_over_15")
+        odd_o15 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Over 1.5")
+        if p15 and p15 >= 0.70 and odd_o15 and BB_PICK_ODD_LO <= odd_o15 <= BB_PICK_ODD_HI:
+            bb_picks.append(_candidate_pick(fix, "Ueber 1,5 Tore", "Over 1.5", 5, "Over 1.5", odd_o15, p15))
+
+        p45 = fix.get("p_under_45")
+        odd_u45 = _find_market_odd(odds_by_fixture, fixture_id, 5, "Under 4.5")
+        if p45 and p45 >= 0.70 and odd_u45 and BB_PICK_ODD_LO <= odd_u45 <= BB_PICK_ODD_HI:
+            bb_picks.append(_candidate_pick(fix, "Unter 4,5 Tore", "Under 4.5", 5, "Under 4.5", odd_u45, p45))
+
+        ps_home = fix.get("p_home_scores")
+        odd_home_scores = _find_market_odd(odds_by_fixture, fixture_id, 16, "Over 0.5")
+        if ps_home and ps_home >= 0.72 and odd_home_scores and BB_PICK_ODD_LO <= odd_home_scores <= BB_PICK_ODD_HI:
+            bb_picks.append(_candidate_pick(fix, "Heimteam erzielt", "Over 0.5", 16, "Over 0.5", odd_home_scores, ps_home))
+
+        ps_away = fix.get("p_away_scores")
+        odd_away_scores = _find_market_odd(odds_by_fixture, fixture_id, 17, "Over 0.5")
+        if ps_away and ps_away >= 0.72 and odd_away_scores and BB_PICK_ODD_LO <= odd_away_scores <= BB_PICK_ODD_HI:
+            bb_picks.append(_candidate_pick(fix, "Auswaertsteam erzielt", "Over 0.5", 17, "Over 0.5", odd_away_scores, ps_away))
+
+        for probability, bet_value, pick_label in (
+            (fix["p_home"], "Home", "Heimsieg"),
+            (fix["p_away"], "Away", "Auswaertssieg"),
+        ):
+            odd = _find_market_odd(odds_by_fixture, fixture_id, 1, bet_value)
+            if probability >= 0.65 and odd and BB_PICK_ODD_LO <= odd <= BB_PICK_ODD_HI:
+                bb_picks.append(_candidate_pick(fix, "Siegerwette", pick_label, 1, bet_value, odd, probability))
+
+        if len(bb_picks) >= 2:
+            bb_eligible_by_fixture[fixture_id] = bb_picks
+
+    for fixture_id, bb_picks in bb_eligible_by_fixture.items():
+        fix_ref = bb_picks[0]  # display fields from first pick
+        for p1, p2 in _combinations(bb_picks, 2):
+            # No two winner bets; no duplicate (bet_id, bet_value)
+            if p1["bet_id"] == 1 and p2["bet_id"] == 1:
+                continue
+            if p1["bet_id"] == p2["bet_id"] and p1["bet_value"] == p2["bet_value"]:
+                continue
+            eff_odd = round(p1["odd"] * p2["odd"] * BETBUILDER_DISCOUNT, 4)
+            combined_prob = p1["probability"] * p2["probability"] * BETBUILDER_DISCOUNT
+            edge = round(combined_prob - (1.0 / eff_odd), 4)
+            sub1 = {**p1, "betbuilder": False}
+            sub2 = {**p2, "betbuilder": True}
+            candidates.append({
+                "fixture_id": fixture_id,
+                "odd": eff_odd,
+                "probability": combined_prob,
+                "edge": edge,
+                "is_bb_pair": True,
+                "bb_sub_picks": [sub1, sub2],
+                "home": fix_ref["home"], "away": fix_ref["away"],
+                "league": fix_ref["league"], "kickoff": fix_ref["kickoff"],
+                "market": "BetBuilder",
+                "pick": f"{p1['pick']} + {p2['pick']}",
+                "bet_id": -1,
+                "bet_value": "",
+                "result": None,
+            })
+
+    # Re-sort including BB pairs (BB pairs tend to have lower edge but are fallback options)
+    candidates.sort(key=lambda c: (
+        0 if not c.get("is_bb_pair") else 1,  # singles first
+        -c["edge"], -c["probability"], c["odd"],
+    ))
     return candidates
 
 
@@ -307,6 +391,13 @@ def _build_two_slips(candidates: list[dict]) -> tuple[tuple[list[dict], float], 
     return first_slip, ([], 0.0), "thin_market"
 
 
+def _expand_candidate(cand: dict) -> list[dict]:
+    """Return the individual picks for a candidate (1 for single, 2 for BB pair)."""
+    if cand.get("is_bb_pair"):
+        return [dict(p) for p in cand["bb_sub_picks"]]
+    return [dict(cand)]
+
+
 def _build_slip_from_candidates(
     candidates: list[dict],
     excluded_fixture_ids: set[int] | None = None,
@@ -319,15 +410,16 @@ def _build_slip_from_candidates(
     for candidate in candidates:
         if candidate["fixture_id"] in used_fixture_ids:
             continue
-        if len(selected) >= MAX_PICKS_PER_SLIP:
-            break
+        n_new = 2 if candidate.get("is_bb_pair") else 1
+        if len(selected) + n_new > MAX_PICKS_PER_SLIP:
+            continue
 
         projected = combined * candidate["odd"]
-        remaining_slots = MAX_PICKS_PER_SLIP - (len(selected) + 1)
+        remaining_slots = MAX_PICKS_PER_SLIP - (len(selected) + n_new)
         if projected * (PICK_ODD_LO ** remaining_slots) > TARGET_HI:
             continue
 
-        selected.append(dict(candidate))
+        selected.extend(_expand_candidate(candidate))
         used_fixture_ids.add(candidate["fixture_id"])
         combined = projected
 
@@ -339,29 +431,35 @@ def _build_slip_from_candidates(
     target_log_hi = log(TARGET_HI)
     best: tuple[list[dict], float] | None = None
 
-    def dfs(start: int, chosen: list[dict], used_ids: set[int], log_sum: float) -> None:
+    def dfs(start: int, chosen: list[dict], used_ids: set[int], log_sum: float, n_picks: int) -> None:
         nonlocal best
-        if len(chosen) > MAX_PICKS_PER_SLIP or log_sum > target_log_hi:
+        if n_picks > MAX_PICKS_PER_SLIP or log_sum > target_log_hi:
             return
-        if len(chosen) >= MIN_PICKS_PER_SLIP and target_log_lo <= log_sum <= target_log_hi:
-            best = ([dict(x) for x in chosen], round(_combined([x["odd"] for x in chosen]), 2))
+        if n_picks >= MIN_PICKS_PER_SLIP and target_log_lo <= log_sum <= target_log_hi:
+            picks = []
+            for c in chosen:
+                picks.extend(_expand_candidate(c))
+            best = (picks, round(_combined([c["odd"] for c in chosen]), 2))
             return
-        if len(chosen) == MAX_PICKS_PER_SLIP:
+        if n_picks == MAX_PICKS_PER_SLIP:
             return
 
         for idx in range(start, len(pool)):
             cand = pool[idx]
             if cand["fixture_id"] in used_ids:
                 continue
+            n_new = 2 if cand.get("is_bb_pair") else 1
+            if n_picks + n_new > MAX_PICKS_PER_SLIP:
+                continue
             chosen.append(cand)
             used_ids.add(cand["fixture_id"])
-            dfs(idx + 1, chosen, used_ids, log_sum + log(cand["odd"]))
+            dfs(idx + 1, chosen, used_ids, log_sum + log(cand["odd"]), n_picks + n_new)
             if best is not None:
                 return
             used_ids.remove(cand["fixture_id"])
             chosen.pop()
 
-    dfs(0, [], set(excluded_fixture_ids), 0.0)
+    dfs(0, [], set(excluded_fixture_ids), 0.0, 0)
     return best if best is not None else ([], 0.0)
 
 
@@ -940,7 +1038,9 @@ async def regenerate_single_slip(
     elif slip_nr == 2:
         cands2 = [
             c for c in candidates
-            if c["bet_id"] in (12, 16, 17, 5) and c.get("bet_value") != "Under 4.5"
+            if (not c.get("is_bb_pair") and c["bet_id"] in (12, 16, 17, 5) and c.get("bet_value") != "Under 4.5")
+            or (c.get("is_bb_pair") and all(p["bet_id"] in (12, 16, 17, 5) for p in c.get("bb_sub_picks", []))
+                and not any(p.get("bet_value") == "Under 4.5" for p in c.get("bb_sub_picks", [])))
         ]
         picks, combined = _build_slip_from_candidates(cands2, excluded_ids)
     else:
@@ -1047,18 +1147,28 @@ async def generate_pattern_slips(
     candidates = _collect_candidates(fixtures, odds_by_fixture)
     if not candidates:
         raise ValueError(
-            f"Keine Kandidaten mit Betano-Quoten zwischen {PICK_ODD_LO:.2f} und {PICK_ODD_HI:.2f} fuer {target_date} gefunden."
+            f"Keine Kandidaten (Einzel oder BetBuilder) mit passenden Betano-Quoten fuer {target_date} gefunden."
         )
+
+    def _bb_uses_only(cand: dict, allowed_bet_ids: set[int]) -> bool:
+        """True if a BB pair uses only picks from allowed_bet_ids."""
+        return all(p["bet_id"] in allowed_bet_ids for p in cand.get("bb_sub_picks", []))
 
     # Try to build structurally different slips by splitting markets:
     # Kombi 1 = DC + Team trifft (sicherer, korrelierte Events)
     # Kombi 2 = DC + Favorit trifft + Ü1,5 (andere Fixtures als Kombi 1)
-    cands_dc_scores = [c for c in candidates if c["bet_id"] in (12, 16, 17)]
+    cands_dc_scores = [
+        c for c in candidates
+        if (not c.get("is_bb_pair") and c["bet_id"] in (12, 16, 17))
+        or (c.get("is_bb_pair") and _bb_uses_only(c, {12, 16, 17}))
+    ]
     picks1_split, odd1_split = _build_slip_from_candidates(cands_dc_scores) if cands_dc_scores else ([], 0.0)
     used_by_slip1 = {p["fixture_id"] for p in picks1_split}
     cands_dc_fav_over = [
         c for c in candidates
-        if c["bet_id"] in (12, 16, 17, 5) and c.get("bet_value") != "Under 4.5"
+        if (not c.get("is_bb_pair") and c["bet_id"] in (12, 16, 17, 5) and c.get("bet_value") != "Under 4.5")
+        or (c.get("is_bb_pair") and _bb_uses_only(c, {12, 16, 17, 5})
+            and not any(p.get("bet_value") == "Under 4.5" for p in c.get("bb_sub_picks", [])))
     ]
     picks2_split, odd2_split = _build_slip_from_candidates(cands_dc_fav_over, used_by_slip1) if cands_dc_fav_over else ([], 0.0)
 
