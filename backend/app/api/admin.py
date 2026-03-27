@@ -255,7 +255,7 @@ async def sync_estimate(
 async def activate_and_sync(
     league_id: int,
     background_tasks: BackgroundTasks,
-    season_year: int = 2025,
+    season_year: int | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -269,6 +269,17 @@ async def activate_and_sync(
 
     if _sync_status.get(league_id, {}).get("status") == "running":
         raise HTTPException(status_code=409, detail="Sync für diese Liga läuft bereits.")
+
+    # Determine season year: international competitions (World/Europe cups) use calendar year,
+    # domestic leagues use the year the current season started (summer-based).
+    if season_year is None:
+        today = date.today()
+        is_international = (league.country in ("World", "Europe") or league.tier == 0)
+        if is_international:
+            season_year = today.year
+        else:
+            # Domestic: season started last summer if we're before July
+            season_year = today.year if today.month >= 7 else today.year - 1
 
     # Activate immediately
     league.is_active = True
