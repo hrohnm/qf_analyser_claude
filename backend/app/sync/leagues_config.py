@@ -31,6 +31,9 @@ LEAGUES: list[dict] = [
     {"id": 2,   "name": "UEFA Champions League", "country": "Europe", "tier": 0},
     {"id": 3,   "name": "UEFA Europa League",    "country": "Europe", "tier": 0},
     {"id": 848, "name": "UEFA Conference League","country": "Europe", "tier": 0},
+    # International Friendlies & Nations League
+    {"id": 10,  "name": "International Friendlies",             "country": "World", "tier": 0},
+    {"id": 5,   "name": "UEFA Nations League",                  "country": "Europe", "tier": 0},
     # FIFA World Cup & Qualifications
     {"id": 1,   "name": "FIFA World Cup",                        "country": "World", "tier": 0},
     {"id": 32,  "name": "WC Qualification - South America",      "country": "World", "tier": 0},
